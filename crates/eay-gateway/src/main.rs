@@ -17,7 +17,7 @@ struct Config {
 /// Per-user data folder, plus the folder older versions (Notchi Gateway) used.
 fn data_dirs() -> (PathBuf, Option<PathBuf>) {
     #[cfg(target_os = "windows")]
-    if let Ok(appdata) = env::var("APPDATA").filter(|a| !a.is_empty()) {
+    if let Some(appdata) = env::var("APPDATA").ok().filter(|a| !a.is_empty()) {
         let base = PathBuf::from(appdata);
         return (base.join("eay-gateway"), Some(base.join("notchi-gateway")));
     }

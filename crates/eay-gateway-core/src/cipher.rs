@@ -42,7 +42,7 @@ impl Cipher {
 
             #[cfg(not(unix))]
             {
-                fs::write(&key_path, &k).map_err(|e| format!("Failed to write gateway.key: {}", e))?;
+                fs::write(&key_path, k).map_err(|e| format!("Failed to write gateway.key: {}", e))?;
             }
 
             k
