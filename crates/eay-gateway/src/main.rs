@@ -10,6 +10,8 @@ struct Config {
     host: String,
     port: u16,
     data_dir: PathBuf,
+    /// Exit after this long without HTTP requests; None runs until stopped.
+    idle_exit: Option<std::time::Duration>,
 }
 
 /// Per-user data folder, plus the folder older versions (Notchi Gateway) used.
@@ -69,13 +71,14 @@ fn parse_args() -> Result<Config, String> {
     let mut host = env_var("HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     let mut port: u16 = env_var("PORT").and_then(|v| v.parse().ok()).unwrap_or(20129);
     let mut data_dir = env_var("DATA_DIR").map(PathBuf::from).unwrap_or_else(default_data_dir);
+    let mut idle_exit = None;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "eay-gateway {}\n\nUSAGE:\n  eay-gateway [OPTIONS]\n\nOPTIONS:\n  --host <HOST>          Bind host (default: 127.0.0.1, env: EAY_GATEWAY_HOST)\n  --port <PORT>          Bind port (default: 20129, env: EAY_GATEWAY_PORT)\n  --data-dir <PATH>      Data directory (default: ~/.eay-gateway, env: EAY_GATEWAY_DATA_DIR)\n  -h, --help             Print help",
+                    "eay-gateway {}\n\nUSAGE:\n  eay-gateway [OPTIONS]\n\nOPTIONS:\n  --host <HOST>          Bind host (default: 127.0.0.1, env: EAY_GATEWAY_HOST)\n  --port <PORT>          Bind port (default: 20129, env: EAY_GATEWAY_PORT)\n  --data-dir <PATH>      Data directory (default: ~/.eay-gateway, env: EAY_GATEWAY_DATA_DIR)\n  --idle-exit <MIN>      Exit after MIN minutes without requests (for apps that share one gateway)\n  -h, --help             Print help",
                     env!("CARGO_PKG_VERSION")
                 );
                 std::process::exit(0);
@@ -91,11 +94,16 @@ fn parse_args() -> Result<Config, String> {
                 let val = args.next().ok_or("--data-dir requires a value")?;
                 data_dir = PathBuf::from(val);
             }
+            "--idle-exit" => {
+                let val = args.next().ok_or("--idle-exit requires minutes")?;
+                let mins: u64 = val.parse().map_err(|_| format!("invalid --idle-exit value: {val}"))?;
+                idle_exit = (mins > 0).then(|| std::time::Duration::from_secs(mins * 60));
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
 
-    Ok(Config { host, port, data_dir })
+    Ok(Config { host, port, data_dir, idle_exit })
 }
 
 async fn root_health() -> Json<Value> {
@@ -126,6 +134,18 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+/// Resolves once no request has arrived for `limit`.
+async fn idle_timeout(last_request: std::sync::Arc<std::sync::Mutex<std::time::Instant>>, limit: std::time::Duration) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let idle = last_request.lock().map(|t| t.elapsed()).unwrap_or_default();
+        if idle >= limit {
+            eprintln!("no requests for {} min; exiting", limit.as_secs() / 60);
+            return;
+        }
     }
 }
 
@@ -176,7 +196,18 @@ async fn main() {
             }
         });
     }
-    let app = gateway_router(engine).route("/health", get(root_health));
+    // Apps that start the gateway on demand pass --idle-exit, so it outlives any one app but
+    // still goes away once nobody uses it.
+    let last_request = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let touch = last_request.clone();
+    let app = gateway_router(engine).route("/health", get(root_health)).layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            if let Ok(mut t) = touch.lock() {
+                *t = std::time::Instant::now();
+            }
+            next.run(req)
+        },
+    ));
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -188,7 +219,15 @@ async fn main() {
 
     eprintln!("eay-gateway v{} listening on http://{} (data: {})", env!("CARGO_PKG_VERSION"), addr, cfg.data_dir.display());
 
-    if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await {
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            match cfg.idle_exit {
+                Some(limit) => tokio::select! { _ = shutdown_signal() => {}, _ = idle_timeout(last_request, limit) => {} },
+                None => shutdown_signal().await,
+            }
+        })
+        .await
+    {
         eprintln!("server error: {e}");
         std::process::exit(1);
     }

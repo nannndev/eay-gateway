@@ -16,6 +16,17 @@ curl http://127.0.0.1:20129/v1/models
 | `--host` | `EAY_GATEWAY_HOST` | `127.0.0.1` |
 | `--port` | `EAY_GATEWAY_PORT` | `20129` |
 | `--data-dir` | `EAY_GATEWAY_DATA_DIR` | `~/.eay-gateway` (`%APPDATA%\eay-gateway` on Windows) |
+| `--idle-exit <min>` | | off: run until stopped |
+
+### Sharing one gateway between apps
+
+Several apps on one machine should share a single gateway, not each run their own:
+
+1. Probe `GET /health`. If it answers `{"service":"eay-gateway"}` with a new enough `version`, use it.
+2. Otherwise start the binary with `--idle-exit 30`. Don't kill it when your app quits; another app
+   may be using it, and it exits by itself after 30 minutes without requests.
+3. Only one gateway can use a data folder at a time (`gateway.lock`); a second one exits with
+   status 3 instead of fighting over the same OAuth tokens.
 
 The older `NOTCHI_GATEWAY_*` variables still work. On first run the gateway moves an existing
 `~/.notchi-gateway` folder to the new location, so connected accounts and keys carry over.
