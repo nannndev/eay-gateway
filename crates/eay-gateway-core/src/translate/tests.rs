@@ -8,7 +8,7 @@ fn feed_all(t: &mut SseToOpenAi, events: &[Value]) -> String {
 
 mod openai_to_codex {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn sample() -> Value {
         openai_to_codex(
@@ -35,7 +35,7 @@ use serde_json::json;
 
 mod openai_to_anthropic {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn sample() -> Value {
         openai_to_anthropic(
@@ -57,7 +57,7 @@ use serde_json::json;
 
 mod openai_to_claude_oauth {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn sample() -> Value {
         openai_to_claude_oauth(
@@ -84,7 +84,7 @@ use serde_json::json;
 
 mod openai_to_gemini {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     #[test]
     fn merges_consecutive_same_role_turns() {
@@ -105,7 +105,7 @@ use serde_json::json;
 
 mod antigravity_envelope {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn sample() -> Value {
         let mut b = openai_to_gemini(
@@ -148,7 +148,7 @@ use serde_json::json;
 
 mod openai_to_commandcode {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn sample() -> Value {
         openai_to_commandcode(
@@ -191,7 +191,7 @@ use serde_json::json;
 
 mod sse_claude {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     #[test]
     fn text_deltas_become_content_chunks() {
@@ -239,7 +239,7 @@ use serde_json::json;
 
 mod sse_codex {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn finished() -> (SseToOpenAi, String) {
         super::sse_codex_finished()
@@ -264,7 +264,7 @@ use serde_json::json;
 
 mod sse_commandcode {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn new() -> SseToOpenAi {
         SseToOpenAi::new("commandcode", "cmc/x".into())
@@ -318,7 +318,7 @@ use serde_json::json;
 
 mod cached_tokens {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     #[test]
     fn claude_cache_reads_are_counted() {
@@ -352,7 +352,7 @@ use serde_json::json;
 
 mod sse_gemini {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     fn out() -> String {
         let mut t = SseToOpenAi::new("gemini", "gc/x".into());
@@ -382,7 +382,7 @@ use serde_json::json;
 
 mod sse_openai_passthrough {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     #[test]
     fn records_usage_from_the_usage_chunk() {
@@ -447,7 +447,7 @@ fn sse_codex_finished() -> (SseToOpenAi, String) {
 
 mod multimodal {
     use super::*;
-use serde_json::json;
+    use serde_json::json;
 
     #[test]
     fn anthropic_translates_images_and_pdf_documents() {

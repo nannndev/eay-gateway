@@ -7,7 +7,9 @@ mod usage;
 #[cfg(test)]
 mod tests;
 
-pub use models::{AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProviderRecord, SkillRecord, UsageEntry, VirtualKeyRecord};
+pub use models::{
+    AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProviderRecord, SkillRecord, UsageEntry, VirtualKeyRecord,
+};
 
 use crate::cipher::Cipher;
 use parking_lot::Mutex;

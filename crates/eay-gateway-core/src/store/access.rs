@@ -1,4 +1,6 @@
-use super::{hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, McpServerRecord, SkillRecord, VirtualKeyRecord, KEY_PREFIX};
+use super::{
+    hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, McpServerRecord, SkillRecord, VirtualKeyRecord, KEY_PREFIX,
+};
 use rusqlite::params;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -167,20 +169,15 @@ impl GatewayStore {
     // ---- Skills (Context Presets) ----------------------------------
     pub fn list_skills(&self) -> Vec<SkillRecord> {
         let conn = self.conn.lock();
-        query_rows(
-            &conn,
-            "SELECT name, description, prompt, enabled, updated_at FROM skills ORDER BY name ASC",
-            [],
-            |r| {
-                Ok(SkillRecord {
-                    name: r.get(0)?,
-                    description: r.get(1)?,
-                    prompt: r.get(2)?,
-                    enabled: r.get::<_, i64>(3)? != 0,
-                    updated_at: r.get(4)?,
-                })
-            },
-        )
+        query_rows(&conn, "SELECT name, description, prompt, enabled, updated_at FROM skills ORDER BY name ASC", [], |r| {
+            Ok(SkillRecord {
+                name: r.get(0)?,
+                description: r.get(1)?,
+                prompt: r.get(2)?,
+                enabled: r.get::<_, i64>(3)? != 0,
+                updated_at: r.get(4)?,
+            })
+        })
     }
 
     pub fn get_skill(&self, name: &str) -> Option<SkillRecord> {
@@ -332,11 +329,8 @@ impl GatewayStore {
         let trimmed = if messages.len() > 40 { &messages[messages.len() - 40..] } else { messages };
         let json = serde_json::to_string(trimmed).map_err(|e| e.to_string())?;
         let conn = self.conn.lock();
-        conn.execute(
-            "INSERT OR REPLACE INTO sessions (id, messages, updated_at) VALUES (?1, ?2, ?3)",
-            params![id, json, now()],
-        )
-        .map_err(|e| e.to_string())?;
+        conn.execute("INSERT OR REPLACE INTO sessions (id, messages, updated_at) VALUES (?1, ?2, ?3)", params![id, json, now()])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

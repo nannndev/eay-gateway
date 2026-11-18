@@ -239,28 +239,15 @@ mod skills {
     #[tokio::test]
     async fn rejects_invalid_skill_name() {
         let (app, _d) = app();
-        let (st, _) = call(
-            &app,
-            "POST",
-            "/gateway/admin/skills",
-            Some(json!({ "name": "bad+name", "prompt": "hi" })),
-            None,
-        )
-        .await;
+        let (st, _) = call(&app, "POST", "/gateway/admin/skills", Some(json!({ "name": "bad+name", "prompt": "hi" })), None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn virtual_key_can_bind_default_skills() {
         let (app, _d) = app();
-        let (st, created) = call(
-            &app,
-            "POST",
-            "/gateway/admin/keys",
-            Some(json!({ "name": "proj-a", "default_skills": ["rust-expert"] })),
-            None,
-        )
-        .await;
+        let (st, created) =
+            call(&app, "POST", "/gateway/admin/keys", Some(json!({ "name": "proj-a", "default_skills": ["rust-expert"] })), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(created["key"]["default_skills"], json!(["rust-expert"]));
     }
@@ -406,14 +393,7 @@ mod mcp_connectors {
     #[tokio::test]
     async fn crud_toggle_and_validation_work() {
         let (app, _d) = app();
-        let (st, _) = call(
-            &app,
-            "POST",
-            "/gateway/admin/mcp",
-            Some(json!({ "name": "fs", "transport": "stdio" })),
-            None,
-        )
-        .await;
+        let (st, _) = call(&app, "POST", "/gateway/admin/mcp", Some(json!({ "name": "fs", "transport": "stdio" })), None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
 
         let (st, created) = call(

@@ -192,7 +192,11 @@ impl ActivityHub {
 }
 
 fn line_count(s: &str) -> usize {
-    if s.is_empty() { 0 } else { s.lines().count().max(1) }
+    if s.is_empty() {
+        0
+    } else {
+        s.lines().count().max(1)
+    }
 }
 
 /// Extracts structured IDE-style metadata (`action`, `file`, `lines`, `+added -removed`, `command`)
@@ -245,7 +249,8 @@ pub fn build_tool_activity_meta(tool_name: &str, args: &Value) -> (ActivityMeta,
             (Some(a), Some(r))
         } else {
             let old = args["old_string"].as_str().or_else(|| args["Target"].as_str()).or_else(|| args["oldText"].as_str()).unwrap_or("");
-            let new = args["new_string"].as_str().or_else(|| args["Replacement"].as_str()).or_else(|| args["newText"].as_str()).unwrap_or("");
+            let new =
+                args["new_string"].as_str().or_else(|| args["Replacement"].as_str()).or_else(|| args["newText"].as_str()).unwrap_or("");
             (Some(line_count(new)), Some(line_count(old)))
         }
     } else {
@@ -275,14 +280,6 @@ pub fn build_tool_activity_meta(tool_name: &str, args: &Value) -> (ActivityMeta,
         msg.push_str(&format!(" +{a} -{r}"));
     }
 
-    let meta = ActivityMeta {
-        action: Some(action.to_string()),
-        file,
-        lines,
-        added,
-        removed,
-        command,
-        duration_ms: None,
-    };
+    let meta = ActivityMeta { action: Some(action.to_string()), file, lines, added, removed, command, duration_ms: None };
     (meta, msg)
 }

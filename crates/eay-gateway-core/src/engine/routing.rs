@@ -209,8 +209,20 @@ pub(super) fn supports_media(t: &Target, req: MediaRequirements) -> bool {
             || is_openai_native
             || matches!(p, "copilot" | "commandcode" | "openrouter")
             || [
-                "vision", "-vl", "gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4", "pixtral", "llava", "qwen-vl", "llama-4",
-                "llama-3.2-11b", "llama-3.2-90b",
+                "vision",
+                "-vl",
+                "gpt-4o",
+                "gpt-4.1",
+                "gpt-5",
+                "o1",
+                "o3",
+                "o4",
+                "pixtral",
+                "llava",
+                "qwen-vl",
+                "llama-4",
+                "llama-3.2-11b",
+                "llama-3.2-90b",
             ]
             .iter()
             .any(|k| m.contains(k));

@@ -1,5 +1,5 @@
-use serde_json::json;
 use super::*;
+use serde_json::json;
 
 /// A fresh store in a temp dir; keep the dir alive for the test's duration.
 fn store() -> (GatewayStore, tempfile::TempDir) {

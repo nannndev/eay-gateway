@@ -255,7 +255,9 @@ pub fn responses_to_openai(body: &Value) -> Value {
                             let mapped: Vec<Value> = parts
                                 .iter()
                                 .filter_map(|p| match p["type"].as_str().unwrap_or("") {
-                                    "input_text" | "output_text" | "text" => Some(json!({ "type": "text", "text": p["text"].as_str().unwrap_or("") })),
+                                    "input_text" | "output_text" | "text" => {
+                                        Some(json!({ "type": "text", "text": p["text"].as_str().unwrap_or("") }))
+                                    }
                                     "input_image" => Some(json!({ "type": "image_url", "image_url": { "url": p["image_url"] } })),
                                     "input_file" => Some(json!({ "type": "file", "file": p })),
                                     _ => None,

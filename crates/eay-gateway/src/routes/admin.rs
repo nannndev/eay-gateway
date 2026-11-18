@@ -75,21 +75,11 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
         .unwrap_or_default();
-    let session_id = headers
-        .get("x-eay-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let max_context_chars = headers
-        .get("x-eay-max-context-chars")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    let redact_secrets = headers
-        .get("x-eay-redact")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == "true" || v == "1");
+    let session_id =
+        headers.get("x-eay-session-id").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let max_context_chars =
+        headers.get("x-eay-max-context-chars").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let redact_secrets = headers.get("x-eay-redact").and_then(|v| v.to_str().ok()).is_some_and(|v| v == "true" || v == "1");
     let mcp_servers = headers
         .get("x-eay-mcp")
         .and_then(|v| v.to_str().ok())
@@ -173,11 +163,7 @@ pub async fn handle_audio_translations(
     handle_audio_multipart(engine, headers, query, body, "audio/translations").await
 }
 
-pub async fn handle_embeddings(
-    State(engine): State<GatewayEngine>,
-    headers: HeaderMap,
-    Json(payload): Json<Value>,
-) -> Response {
+pub async fn handle_embeddings(State(engine): State<GatewayEngine>, headers: HeaderMap, Json(payload): Json<Value>) -> Response {
     let key = match resolve_virtual_key(&engine, &headers) {
         Ok(k) => k,
         Err(e) => return e.into_response(),
@@ -187,11 +173,7 @@ pub async fn handle_embeddings(
 }
 
 /// Anthropic-native `/v1/messages` endpoint (used by Claude Code CLI and Anthropic SDKs).
-pub async fn handle_anthropic_messages(
-    State(engine): State<GatewayEngine>,
-    headers: HeaderMap,
-    Json(payload): Json<Value>,
-) -> Response {
+pub async fn handle_anthropic_messages(State(engine): State<GatewayEngine>, headers: HeaderMap, Json(payload): Json<Value>) -> Response {
     let key = match resolve_virtual_key(&engine, &headers) {
         Ok(k) => k,
         Err(e) => return e.into_response(),
@@ -243,11 +225,7 @@ pub async fn handle_anthropic_messages(
 }
 
 /// OpenAI Responses API (`/v1/responses`) handler.
-pub async fn handle_responses(
-    State(engine): State<GatewayEngine>,
-    headers: HeaderMap,
-    Json(payload): Json<Value>,
-) -> Response {
+pub async fn handle_responses(State(engine): State<GatewayEngine>, headers: HeaderMap, Json(payload): Json<Value>) -> Response {
     let key = match resolve_virtual_key(&engine, &headers) {
         Ok(k) => k,
         Err(e) => return e.into_response(),
@@ -352,10 +330,7 @@ pub async fn handle_create_key(
         .create_virtual_key(&payload.name, payload.allowed_providers, payload.rate_limit_per_min)
         .map_err(GatewayError::Internal)?;
     if payload.max_tokens_budget.is_some() || payload.max_cost_usd.is_some() {
-        engine
-            .store
-            .set_virtual_key_limits(&record.id, payload.max_tokens_budget, payload.max_cost_usd)
-            .map_err(GatewayError::Internal)?;
+        engine.store.set_virtual_key_limits(&record.id, payload.max_tokens_budget, payload.max_cost_usd).map_err(GatewayError::Internal)?;
         record.max_tokens_budget = payload.max_tokens_budget;
         record.max_cost_usd = payload.max_cost_usd;
     }
@@ -393,10 +368,7 @@ pub async fn handle_save_skill(
     Json(payload): Json<SaveSkillPayload>,
 ) -> Result<Json<Value>, GatewayError> {
     let name = payload.name.as_deref().unwrap_or("");
-    let skill = engine
-        .store
-        .save_skill(name, &payload.description, &payload.prompt, payload.enabled)
-        .map_err(GatewayError::BadRequest)?;
+    let skill = engine.store.save_skill(name, &payload.description, &payload.prompt, payload.enabled).map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "skill": skill })))
 }
 
@@ -405,10 +377,7 @@ pub async fn handle_put_skill(
     Path(name): Path<String>,
     Json(payload): Json<SaveSkillPayload>,
 ) -> Result<Json<Value>, GatewayError> {
-    let skill = engine
-        .store
-        .save_skill(&name, &payload.description, &payload.prompt, payload.enabled)
-        .map_err(GatewayError::BadRequest)?;
+    let skill = engine.store.save_skill(&name, &payload.description, &payload.prompt, payload.enabled).map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "skill": skill })))
 }
 
@@ -449,10 +418,7 @@ pub async fn handle_list_agents(State(engine): State<GatewayEngine>) -> Json<Val
     Json(json!({ "agents": engine.store.list_agents() }))
 }
 
-pub async fn handle_save_agent(
-    State(engine): State<GatewayEngine>,
-    Json(p): Json<SaveAgentPayload>,
-) -> Result<Json<Value>, GatewayError> {
+pub async fn handle_save_agent(State(engine): State<GatewayEngine>, Json(p): Json<SaveAgentPayload>) -> Result<Json<Value>, GatewayError> {
     let name = p.name.as_deref().unwrap_or("");
     let agent = engine
         .store
@@ -497,9 +463,9 @@ pub async fn handle_activity_events(
 ) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let recent = engine.activity.recent_events();
     let rx = engine.activity.subscribe();
-    let initial = futures::stream::iter(recent.into_iter().map(|ev| {
-        Ok(Event::default().event(&ev.phase).data(serde_json::to_string(&ev).unwrap_or_default()))
-    }));
+    let initial = futures::stream::iter(
+        recent.into_iter().map(|ev| Ok(Event::default().event(&ev.phase).data(serde_json::to_string(&ev).unwrap_or_default()))),
+    );
     let live = futures::stream::unfold(rx, |mut rx| async move {
         loop {
             match rx.recv().await {
@@ -601,9 +567,7 @@ pub async fn handle_delete_mcp(State(engine): State<GatewayEngine>, Path(name): 
 
 pub async fn handle_mcp_tools(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Result<Json<Value>, GatewayError> {
     let srv = engine.store.get_mcp_server(&name).ok_or_else(|| GatewayError::NotFound("MCP server not found".into()))?;
-    let tools = eay_gateway_core::mcp::list_tools_openai(&engine.http_client, &srv)
-        .await
-        .map_err(GatewayError::BadGateway)?;
+    let tools = eay_gateway_core::mcp::list_tools_openai(&engine.http_client, &srv).await.map_err(GatewayError::BadGateway)?;
     Ok(Json(json!({ "tools": tools })))
 }
 

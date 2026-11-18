@@ -137,10 +137,7 @@ impl GatewayEngine {
         if p.needs_key && api_key.is_none() {
             return None;
         }
-        let base = rec
-            .and_then(|r| r.base_url)
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| p.base_url.to_string());
+        let base = rec.and_then(|r| r.base_url).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| p.base_url.to_string());
         Some((api_key, base.trim_end_matches('/').to_string()))
     }
 
@@ -290,7 +287,17 @@ impl GatewayEngine {
             let status = upstream.status();
             if !status.is_success() {
                 last_error = self
-                    .handle_upstream_error(upstream, &target, acc.as_ref(), &cool, key.as_ref(), &key_name, t0, false, settings.cooldown_secs)
+                    .handle_upstream_error(
+                        upstream,
+                        &target,
+                        acc.as_ref(),
+                        &cool,
+                        key.as_ref(),
+                        &key_name,
+                        t0,
+                        false,
+                        settings.cooldown_secs,
+                    )
                     .await;
                 continue;
             }
@@ -299,7 +306,8 @@ impl GatewayEngine {
                 let _ = self.store.record_account_error(&a.id, None);
                 self.sticky.lock().insert(target.provider.clone(), a.id.clone());
             }
-            let content_type = upstream.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
+            let content_type =
+                upstream.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
             let resp_bytes = upstream.bytes().await.map_err(|e| gateway_err(502, e.to_string()))?;
             self.store.record_usage(&UsageEntry {
                 key_id: key.as_ref().map(|k| k.id.as_str()),
@@ -335,12 +343,7 @@ impl GatewayEngine {
         body: Value,
         header_skills: &[String],
     ) -> Result<ChatReply, ChatError> {
-        self.chat_completions_with_options(
-            key,
-            body,
-            ChatOptions { skills: header_skills.to_vec(), ..Default::default() },
-        )
-        .await
+        self.chat_completions_with_options(key, body, ChatOptions { skills: header_skills.to_vec(), ..Default::default() }).await
     }
 
     /// Full chat routing entry point supporting Agent profiles (`agent/<name>`), Skills,
@@ -393,28 +396,17 @@ impl GatewayEngine {
         let incoming_turns: Vec<Value> = body
             .get("messages")
             .and_then(|m| m.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter(|m| !matches!(m["role"].as_str(), Some("system" | "developer")))
-                    .cloned()
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter(|m| !matches!(m["role"].as_str(), Some("system" | "developer"))).cloned().collect())
             .unwrap_or_default();
 
         if let Some(ref sid) = opts.session_id {
             let history = self.store.get_session_messages(sid);
             if !history.is_empty() {
                 if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-                    let sys: Vec<Value> = msgs
-                        .iter()
-                        .filter(|m| matches!(m["role"].as_str(), Some("system" | "developer")))
-                        .cloned()
-                        .collect();
-                    let non_sys: Vec<Value> = msgs
-                        .iter()
-                        .filter(|m| !matches!(m["role"].as_str(), Some("system" | "developer")))
-                        .cloned()
-                        .collect();
+                    let sys: Vec<Value> =
+                        msgs.iter().filter(|m| matches!(m["role"].as_str(), Some("system" | "developer"))).cloned().collect();
+                    let non_sys: Vec<Value> =
+                        msgs.iter().filter(|m| !matches!(m["role"].as_str(), Some("system" | "developer"))).cloned().collect();
                     msgs.clear();
                     msgs.extend(sys);
                     msgs.extend(history);
@@ -532,15 +524,7 @@ impl GatewayEngine {
         }
 
         let reply = self
-            .execute_chat_turn(
-                key.as_ref(),
-                &body,
-                &req_model,
-                &run_id,
-                parent_id.as_deref(),
-                agent_label.as_deref(),
-                media_req,
-            )
+            .execute_chat_turn(key.as_ref(), &body, &req_model, &run_id, parent_id.as_deref(), agent_label.as_deref(), media_req)
             .await?;
         if let (Some(ref sid), ChatReply::Json(ref reply_json)) = (&opts.session_id, &reply) {
             self.append_session_turn(sid, &incoming_turns, reply_json);
@@ -662,17 +646,7 @@ impl GatewayEngine {
             };
             if !upstream.status().is_success() {
                 last_error = self
-                    .handle_upstream_error(
-                        upstream,
-                        &target,
-                        acc.as_ref(),
-                        &cool,
-                        key,
-                        &key_name,
-                        t0,
-                        wants_stream,
-                        settings.cooldown_secs,
-                    )
+                    .handle_upstream_error(upstream, &target, acc.as_ref(), &cool, key, &key_name, t0, wants_stream, settings.cooldown_secs)
                     .await;
                 eprintln!("[GATEWAY CHAT] {last_error}");
                 self.activity.emit_phase(
@@ -739,15 +713,7 @@ impl GatewayEngine {
             return Ok(ChatReply::Json(reply_json));
         }
 
-        self.activity.emit_phase(
-            run_id,
-            parent_id,
-            agent_label,
-            "failed",
-            format!("Failed: {last_error}"),
-            None,
-            None,
-        );
+        self.activity.emit_phase(run_id, parent_id, agent_label, "failed", format!("Failed: {last_error}"), None, None);
         Err(gateway_err(502, format!("No connected AI provider could respond: {last_error}")))
     }
 
@@ -1160,7 +1126,15 @@ mod tests {
             let run = hub.create_run("sub_1".into(), Some("sess_1".into()), "Reviewer".into(), "auto".into());
             assert_eq!(run.phase, "queued");
 
-            hub.emit_phase("sub_1", Some("sess_1"), Some("Reviewer"), "calling_tool", "Calling tool `read_file`...", Some("oa/gpt-4o"), Some("read_file"));
+            hub.emit_phase(
+                "sub_1",
+                Some("sess_1"),
+                Some("Reviewer"),
+                "calling_tool",
+                "Calling tool `read_file`...",
+                Some("oa/gpt-4o"),
+                Some("read_file"),
+            );
             let updated = hub.get_run("sub_1").unwrap();
             assert_eq!(updated.phase, "calling_tool");
             assert_eq!(updated.tool.as_deref(), Some("read_file"));

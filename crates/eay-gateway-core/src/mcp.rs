@@ -26,10 +26,7 @@ async fn send_line(stdin: &mut tokio::process::ChildStdin, msg: Value) -> Result
     stdin.flush().await.map_err(|e| format!("MCP flush failed: {e}"))
 }
 
-async fn read_rpc_id(
-    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-    target_id: i64,
-) -> Result<Value, String> {
+async fn read_rpc_id(reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>, target_id: i64) -> Result<Value, String> {
     while let Ok(Some(line)) = reader.next_line().await {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -115,18 +112,9 @@ async fn http_rpc(http: &Client, server: &McpServerRecord, method: &str, params:
         }
     });
     let mut session_id: Option<String> = None;
-    if let Ok(init_resp) = apply_http_headers(http.post(url), server, None)
-        .json(&init_req)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-    {
+    if let Ok(init_resp) = apply_http_headers(http.post(url), server, None).json(&init_req).timeout(Duration::from_secs(15)).send().await {
         if init_resp.status().is_success() {
-            session_id = init_resp
-                .headers()
-                .get("mcp-session-id")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
+            session_id = init_resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()).map(String::from);
             let inited = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
             let _ = apply_http_headers(http.post(url), server, session_id.as_deref())
                 .json(&inited)
@@ -180,11 +168,8 @@ pub async fn list_tools_openai(http: &Client, server: &McpServerRecord) -> Resul
         .into_iter()
         .filter_map(|t| {
             let name = t["name"].as_str()?;
-            let schema = if t["inputSchema"].is_object() {
-                t["inputSchema"].clone()
-            } else {
-                json!({ "type": "object", "properties": {} })
-            };
+            let schema =
+                if t["inputSchema"].is_object() { t["inputSchema"].clone() } else { json!({ "type": "object", "properties": {} }) };
             Some(json!({
                 "type": "function",
                 "function": {

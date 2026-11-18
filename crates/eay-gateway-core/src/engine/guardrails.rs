@@ -33,9 +33,7 @@ fn redact_text(input: &str) -> String {
         };
         out.push_str(&rest[..idx]);
         let after = &rest[idx..];
-        let tok_len = after
-            .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-            .unwrap_or(after.len());
+        let tok_len = after.find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').unwrap_or(after.len());
         if tok_len >= prefix.len() + 8 {
             out.push_str(prefix);
             out.push_str("[REDACTED]");

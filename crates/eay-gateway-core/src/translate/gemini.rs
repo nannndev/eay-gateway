@@ -39,7 +39,8 @@ fn gemini_user_parts(content: &Value) -> Vec<Value> {
                 } else if let Some((data_or_url, filename, explicit_mime)) = extract_file_part(p) {
                     if let Some((mime, data)) = parse_data_url(data_or_url) {
                         out.push(json!({ "inlineData": { "mimeType": mime, "data": data } }));
-                    } else if data_or_url.starts_with("http://") || data_or_url.starts_with("https://") || data_or_url.starts_with("gs://") {
+                    } else if data_or_url.starts_with("http://") || data_or_url.starts_with("https://") || data_or_url.starts_with("gs://")
+                    {
                         let mime = explicit_mime.unwrap_or_else(|| infer_mime(filename.unwrap_or(data_or_url), "application/pdf"));
                         out.push(json!({ "fileData": { "mimeType": mime, "fileUri": data_or_url } }));
                     } else {
