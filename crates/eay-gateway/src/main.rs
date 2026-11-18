@@ -41,6 +41,25 @@ fn default_data_dir() -> PathBuf {
     dir
 }
 
+/// Exclusive lock on `<data>/gateway.lock`; fails if another gateway already uses this folder.
+fn lock_data_dir(dir: &std::path::Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create data folder {}: {e}", dir.display()))?;
+    let path = dir.join("gateway.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err(format!("another eay-gateway is already using {}; use that one or pass a different --data-dir", dir.display()))
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("cannot lock {}: {e}", path.display())),
+    }
+}
+
 /// `EAY_GATEWAY_*`, falling back to the older `NOTCHI_GATEWAY_*` names.
 fn env_var(name: &str) -> Option<String> {
     env::var(format!("EAY_GATEWAY_{name}")).or_else(|_| env::var(format!("NOTCHI_GATEWAY_{name}"))).ok().filter(|v| !v.is_empty())
@@ -128,6 +147,16 @@ async fn main() {
         }
     };
 
+    // Two gateways sharing a data folder would refresh the same OAuth tokens and invalidate each
+    // other's; hold an exclusive lock for the life of the process (released by the OS on exit).
+    let _lock = match lock_data_dir(&cfg.data_dir) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(3);
+        }
+    };
+
     let store = match GatewayStore::new(&cfg.data_dir) {
         Ok(s) => s,
         Err(e) => {
@@ -162,5 +191,25 @@ async fn main() {
     if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await {
         eprintln!("server error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::lock_data_dir;
+
+    #[test]
+    fn a_second_lock_on_the_same_data_dir_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = lock_data_dir(dir.path()).unwrap();
+        assert!(lock_data_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn the_lock_is_free_again_once_released() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(lock_data_dir(dir.path()).unwrap());
+        assert!(lock_data_dir(dir.path()).is_ok());
     }
 }
