@@ -48,6 +48,12 @@ Prebuilt binaries for macOS, Windows and Linux are on the
 | [Architecture](docs/architecture.md) | Crates and modules, request flow, storage, embedding the core in Rust |
 | [Development](docs/development.md) | Building, testing, releasing, adding a provider |
 
+To preview the documentation & landing page locally:
+```sh
+npm install
+npm run docs:dev    # http://localhost:5173
+```
+
 ## Security
 
 The management API has no authentication, so keep the gateway bound to `127.0.0.1` (the default).

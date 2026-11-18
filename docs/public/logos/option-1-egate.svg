@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Option 1: E-Gate Monogram (Industrial Router / Rust CLI character) -->
+  <!-- Chamfered dark obsidian container -->
+  <path d="M18 6 H82 L94 18 V82 L82 94 H18 L6 82 V18 Z" fill="#0A0A0C" stroke="#27272A" stroke-width="2.5"/>
+  <!-- Left vertical spine -->
+  <rect x="24" y="24" width="11" height="52" rx="1.5" fill="#FFFFFF"/>
+  <!-- Top rail -->
+  <path d="M39 24 H73 L78 29 V35 H39 Z" fill="#FFFFFF"/>
+  <!-- Middle active routing blade (shoots forward with arrow tip) -->
+  <path d="M39 44.5 H72 L83 50 L72 55.5 H39 Z" fill="#FFFFFF"/>
+  <!-- Bottom rail -->
+  <path d="M39 65 H78 V71 L73 76 H39 Z" fill="#A1A1AA"/>
+  <!-- Subtle corner registration marks -->
+  <circle cx="15" cy="15" r="1.5" fill="#52525B"/>
+  <circle cx="85" cy="85" r="1.5" fill="#52525B"/>
+</svg>

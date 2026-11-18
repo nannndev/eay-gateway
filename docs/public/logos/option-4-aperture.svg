@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Option 4: Tactical Aperture (Multiplexer crosshair + orbital arcs) -->
+  <circle cx="50" cy="50" r="44" fill="#08080A" stroke="#27272A" stroke-width="2.5"/>
+  <!-- Outer precision ring segments -->
+  <path d="M50 16 A34 34 0 0 1 84 50" stroke="#FFFFFF" stroke-width="4" stroke-linecap="butt"/>
+  <path d="M50 84 A34 34 0 0 1 16 50" stroke="#FFFFFF" stroke-width="4" stroke-linecap="butt"/>
+  <path d="M20 33 A34 34 0 0 1 33 20" stroke="#71717A" stroke-width="3"/>
+  <path d="M80 67 A34 34 0 0 1 67 80" stroke="#71717A" stroke-width="3"/>
+  <!-- Crosshair ticks -->
+  <line x1="50" y1="8" x2="50" y2="26" stroke="#FFFFFF" stroke-width="2.5"/>
+  <line x1="50" y1="74" x2="50" y2="92" stroke="#FFFFFF" stroke-width="2.5"/>
+  <line x1="8" y1="50" x2="26" y2="50" stroke="#A1A1AA" stroke-width="2.5"/>
+  <line x1="74" y1="50" x2="92" y2="50" stroke="#A1A1AA" stroke-width="2.5"/>
+  <!-- Diamond core -->
+  <polygon points="50,35 65,50 50,65 35,50" fill="#FFFFFF"/>
+  <circle cx="50" cy="50" r="5" fill="#08080A"/>
+</svg>
