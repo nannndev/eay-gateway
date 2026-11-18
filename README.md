@@ -1,29 +1,36 @@
 # eay-gateway
 
-One local, OpenAI-compatible endpoint for all your AI subscriptions and API keys.
+One local, OpenAI-, Anthropic-, and Responses-compatible AI gateway for all your subscriptions and API keys — with an embedded Web Control Console, multimodal routing, reusable Skills/Agents, guardrails, and live subagent activity.
 
-Point Claude Code, Codex, Cursor, OpenNotchi or any OpenAI client at `http://127.0.0.1:20129/v1`.
-The gateway sends each request to one of your connected accounts and moves on to the next one
-when an account is rate-limited, out of quota or down.
+Point **Claude Code**, **Codex**, **Cursor**, **OpenNotchi**, or any OpenAI/Anthropic SDK at `http://127.0.0.1:20129`.
+The gateway sends each request to one of your connected accounts and automatically fails over to the next one when an account is rate-limited, out of quota, or down.
+
+## Key Features
 
 - **14 subscription logins** (Claude, ChatGPT/Codex, GitHub Copilot, Gemini CLI, Kimi, Cline, Kiro, …)
   and **52 API-key providers** (OpenAI, Anthropic, DeepSeek, OpenRouter, Groq, NVIDIA, …)
-- **Routing:** `auto` across everything, one provider (`cx/auto`), or your own mix (`auto/coding`),
-  with priority, round-robin or fill-first, and cooldown after rate limits
-- **Several accounts and keys per provider**, rotated and paused independently
-- **Live quotas** per account (remaining %, reset time, plan), usage history and estimated cost
-- **Model lists synced** from each provider
-- Translates between OpenAI, Anthropic, Codex Responses, Gemini, Command Code and Kiro formats,
-  streaming or not
+- **Multi-protocol endpoints:**
+  - `POST /v1/chat/completions` (OpenAI Chat Completions)
+  - `POST /v1/messages` (Anthropic native — plug-and-play for Claude Code & Anthropic SDKs)
+  - `POST /v1/responses` (OpenAI Responses API)
+  - `POST /v1/embeddings`, `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`
+- **Smart Routing & Failover:** `auto`, `<alias>/auto`, custom combos (`auto/coding`), priority / round-robin / fill-first, and automatic cooldowns after rate limits
+- **Multimodal & Code-Ready:** Translates images, PDFs, video, and audio across Anthropic, Gemini, and Codex; automatically decodes plain-text/code file attachments for text-only models and skips text-only providers when `auto` receives binary media
+- **Skills, Agent Personalities & Session Memory:**
+  - Reusable **Skills** (`+skill`, `x-eay-skills`, or upload `SKILL.md` in the console)
+  - **Agent Profiles** (`agent/<name>`) combining model/combo, skills, personality, and tuning
+  - **Session Memory** via `x-eay-session-id`
+- **Guardrails & Budgets:** Virtual keys (`gw-sk-…`) with per-key `allowed_providers`, `rate_limit_per_min`, `max_tokens_budget`, `max_cost_usd`, plus optional secret redaction (`x-eay-redact: true`) and context trimming (`x-eay-max-context-chars`)
+- **Embedded Web Console & Live Activity:** Open `http://127.0.0.1:20129/` (or `/ui`) to manage providers, keys, skills, agents, playground, and watch **real-time subagent & request phases** (`preparing`, `routing`, `thinking`, `calling_tool`, `generating`, `failover`, `completed`) over SSE
 
 ## Quick start
 
 ```sh
 git clone https://github.com/nannndev/eay-gateway && cd eay-gateway
-cargo run --release --bin eay-gateway       # http://127.0.0.1:20129
+cargo run --release --bin eay-gateway       # http://127.0.0.1:20129 (Web Console at /ui)
 ```
 
-Connect a provider, then ask something:
+Connect a provider, then send a request:
 
 ```sh
 curl -X POST http://127.0.0.1:20129/gateway/admin/providers/deepseek/connect \
@@ -31,6 +38,14 @@ curl -X POST http://127.0.0.1:20129/gateway/admin/providers/deepseek/connect \
 
 curl http://127.0.0.1:20129/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Or point Claude Code CLI directly at the gateway:
+
+```sh
+export ANTHROPIC_BASE_URL="http://127.0.0.1:20129"
+export ANTHROPIC_API_KEY="gw-sk-local"
+claude
 ```
 
 Prebuilt binaries for macOS, Windows and Linux are on the
@@ -44,11 +59,11 @@ Prebuilt binaries for macOS, Windows and Linux are on the
 | [Configuration](docs/configuration.md) | Flags, environment variables, data folder, sharing one gateway between apps |
 | [Routing](docs/routing.md) | Model ids, auto modes, combos, strategies, fallback and cooldown |
 | [Providers](docs/providers.md) | Every provider, its alias, how to log in, quotas and model sync |
-| [HTTP API](docs/api.md) | `/v1` OpenAI-compatible API and the `/gateway/admin` management API |
+| [HTTP API](docs/api.md) | `/v1` inference APIs and `/gateway/admin` management, skills, agents & live activity |
 | [Architecture](docs/architecture.md) | Crates and modules, request flow, storage, embedding the core in Rust |
 | [Development](docs/development.md) | Building, testing, releasing, adding a provider |
 
-To preview the documentation & landing page locally:
+To preview the VitePress documentation & landing page locally:
 ```sh
 npm install
 npm run docs:dev    # http://localhost:5173
@@ -56,10 +71,9 @@ npm run docs:dev    # http://localhost:5173
 
 ## Security
 
-The management API has no authentication, so keep the gateway bound to `127.0.0.1` (the default).
-API keys and OAuth tokens are encrypted on disk with AES-256-GCM, using a key file in the data folder.
-Clients of `/v1` may present gateway-issued virtual keys (`gw-sk-…`) with per-key provider limits
-and rate limits.
+- By default the gateway binds to `127.0.0.1` without admin authentication. If you expose it beyond localhost, pass `--admin-token <TOKEN>` (or set `EAY_GATEWAY_ADMIN_TOKEN`) to protect `/gateway/admin/*`.
+- API keys and OAuth tokens are encrypted on disk with AES-256-GCM, using a key file in the data folder.
+- Clients of `/v1/*` may present gateway-issued virtual keys (`gw-sk-…`) with per-key provider limits, rate limits, token/USD budgets, and default skills.
 
 ## Experimental providers
 

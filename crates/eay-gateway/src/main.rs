@@ -94,6 +94,10 @@ fn parse_args() -> Result<Config, String> {
                 let val = args.next().ok_or("--data-dir requires a value")?;
                 data_dir = PathBuf::from(val);
             }
+            "--admin-token" => {
+                let val = args.next().ok_or("--admin-token requires a value")?;
+                std::env::set_var("EAY_GATEWAY_ADMIN_TOKEN", val);
+            }
             "--idle-exit" => {
                 let val = args.next().ok_or("--idle-exit requires minutes")?;
                 let mins: u64 = val.parse().map_err(|_| format!("invalid --idle-exit value: {val}"))?;

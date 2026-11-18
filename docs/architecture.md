@@ -6,17 +6,18 @@
 crates/
 ├── eay-gateway-core/      library: everything that isn't HTTP
 │   ├── providers.rs       provider catalog: ids, aliases, base URLs, families, built-in models
-│   ├── store.rs           SQLite store: accounts, keys, usage, settings, combos, cooldowns
+│   ├── store/             SQLite store (models, accounts, providers, access/skills/agents/sessions, usage)
 │   ├── cipher.rs          AES-256-GCM for secrets at rest
-│   ├── engine.rs          routing: resolve model id → attempts → upstream request → reply
-│   ├── translate.rs       OpenAI ⇄ Anthropic, Codex Responses, Gemini, Command Code; SSE translators
+│   ├── engine/            orchestrator (mod), routing, stream/usage guard, guardrails, activity & subagents, state
+│   ├── translate/         multimodal media, OpenAI ⇄ Anthropic, Codex Responses, Gemini, Command Code; SSE translators
 │   ├── kiro.rs            Kiro request format and AWS event-stream decoder (CRC-checked)
 │   ├── oauth/             logins (browser, device code, imports), token refresh, per-provider requests
 │   ├── quota.rs           live usage windows per account, cached, keep-last-good
 │   ├── models.rs          key verification and model list sync
 │   └── pricing.rs         estimated cost per request
 └── eay-gateway/           HTTP server and the `eay-gateway` binary
-    ├── routes/            axum handlers: /v1 and /gateway/admin
+    ├── routes/            axum handlers: /v1, /gateway/admin, optional --admin-token middleware
+    ├── ui.html            embedded deep-dark monochrome Web Control Console (/ & /ui)
     ├── error.rs           GatewayError → HTTP status + JSON body
     └── main.rs            flags, data folder + migration, lock, idle exit, hourly model refresh
 ```
@@ -56,8 +57,11 @@ One SQLite file, `gateway.db`:
 | `providers` | API-key providers: encrypted main key, base URL, enabled, custom models, synced models + time, last check |
 | `accounts` | Subscription accounts and extra API keys: provider, label, email, encrypted credential JSON, order, enabled, last error |
 | `usage` | One row per attempt: provider, model, tokens (input, output, cached), cost, duration, status, virtual key |
-| `keys` | Virtual keys: SHA-256 of the secret, limits, totals |
+| `keys` | Virtual keys: SHA-256 of the secret, limits, budgets (`max_tokens_budget`, `max_cost_usd`), `default_skills`, totals |
 | `combos` | Combo name → JSON list of targets |
+| `skills` | Context/Skill presets: name, description, prompt, enabled |
+| `agents` | Agent Personality profiles: model, skills, personality, temperature, max_tokens |
+| `sessions` | Conversation memory keyed by `x-eay-session-id` |
 | `settings` | Routing settings, Gemini OAuth client |
 
 Secrets (`providers.api_key`, `accounts.secret`) are AES-256-GCM encrypted with `gateway.key`.

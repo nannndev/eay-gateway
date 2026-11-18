@@ -161,3 +161,241 @@ mod providers {
         assert_eq!(call(&app, "POST", "/gateway/admin/providers/openai/import", None, None).await.0, StatusCode::BAD_REQUEST);
     }
 }
+
+mod multimodal_endpoints {
+    use super::*;
+
+    #[tokio::test]
+    async fn images_generations_rejects_unknown_gateway_key() {
+        let (app, _d) = app();
+        let body = json!({ "model": "openai/dall-e-3", "prompt": "a cat" });
+        let (status, _) = call(&app, "POST", "/v1/images/generations", Some(body), Some("gw-sk-bogus")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn images_generations_fails_with_bad_gateway_when_nothing_is_connected() {
+        let (app, _d) = app();
+        let body = json!({ "model": "openai/dall-e-3", "prompt": "a cat" });
+        let (status, _) = call(&app, "POST", "/v1/images/generations", Some(body), None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn audio_speech_fails_with_bad_gateway_when_nothing_is_connected() {
+        let (app, _d) = app();
+        let body = json!({ "model": "openai/tts-1", "input": "hello", "voice": "alloy" });
+        let (status, _) = call(&app, "POST", "/v1/audio/speech", Some(body), None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn audio_transcriptions_fails_with_bad_gateway_when_nothing_is_connected() {
+        let (app, _d) = app();
+        let boundary = "----testboundary";
+        let multipart =
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nopenai/whisper-1\r\n--{boundary}--\r\n");
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+            .body(axum::body::Body::from(multipart))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+}
+
+mod skills {
+    use super::*;
+
+    #[tokio::test]
+    async fn crud_and_toggle_work() {
+        let (app, _d) = app();
+        let (st, created) = call(
+            &app,
+            "POST",
+            "/gateway/admin/skills",
+            Some(json!({ "name": "rust-expert", "description": "Rust", "prompt": "Write clean Rust." })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(created["skill"]["enabled"], true);
+
+        let (st, list) = call(&app, "GET", "/gateway/admin/skills", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["skills"].as_array().unwrap().len(), 1);
+
+        let (st, toggled) = call(&app, "PATCH", "/gateway/admin/skills/rust-expert/toggle", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(toggled["skill"]["enabled"], false);
+
+        let (st, del) = call(&app, "DELETE", "/gateway/admin/skills/rust-expert", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(del["status"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_skill_name() {
+        let (app, _d) = app();
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/gateway/admin/skills",
+            Some(json!({ "name": "bad+name", "prompt": "hi" })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn virtual_key_can_bind_default_skills() {
+        let (app, _d) = app();
+        let (st, created) = call(
+            &app,
+            "POST",
+            "/gateway/admin/keys",
+            Some(json!({ "name": "proj-a", "default_skills": ["rust-expert"] })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(created["key"]["default_skills"], json!(["rust-expert"]));
+    }
+}
+
+mod embeddings_and_anthropic {
+    use super::*;
+
+    #[tokio::test]
+    async fn embeddings_rejects_unknown_key_and_fails_502_when_nothing_connected() {
+        let (app, _d) = app();
+        let body = json!({ "model": "openai/text-embedding-3-small", "input": "hello" });
+        assert_eq!(call(&app, "POST", "/v1/embeddings", Some(body.clone()), Some("gw-sk-bogus")).await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(call(&app, "POST", "/v1/embeddings", Some(body), None).await.0, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_returns_anthropic_error_format() {
+        let (app, _d) = app();
+        let body = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 128,
+            "messages": [{ "role": "user", "content": "hi" }]
+        });
+        let (st, resp) = call(&app, "POST", "/v1/messages", Some(body), None).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY);
+        assert_eq!(resp["type"], "error");
+        assert_eq!(resp["error"]["type"], "api_error");
+    }
+}
+
+mod virtual_key_budgets {
+    use super::*;
+
+    #[tokio::test]
+    async fn enforces_max_tokens_budget_and_max_cost_usd() {
+        let (app, _d) = app();
+        let (st, created) = call(
+            &app,
+            "POST",
+            "/gateway/admin/keys",
+            Some(json!({ "name": "budgeted", "max_tokens_budget": 100, "max_cost_usd": 0.5 })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(created["key"]["max_tokens_budget"], 100);
+        assert_eq!(created["key"]["max_cost_usd"], 0.5);
+    }
+}
+
+mod web_ui {
+    use super::*;
+
+    #[tokio::test]
+    async fn serves_embedded_console_at_root_and_ui() {
+        let (app, _d) = app();
+        for path in ["/", "/ui"] {
+            let req = axum::http::Request::builder().method("GET").uri(path).body(axum::body::Body::empty()).unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+            assert!(ct.contains("text/html"), "{ct}");
+        }
+    }
+}
+
+mod agents_and_sessions {
+    use super::*;
+
+    #[tokio::test]
+    async fn agents_crud_and_models_listing_work() {
+        let (app, _d) = app();
+        let (st, created) = call(
+            &app,
+            "POST",
+            "/gateway/admin/agents",
+            Some(json!({
+                "name": "senior-rust",
+                "description": "Strict Rust reviewer",
+                "model": "auto/coding",
+                "skills": ["rust-expert"],
+                "personality": "Speak concisely.",
+                "temperature": 0.2
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(created["agent"]["name"], "senior-rust");
+
+        let (_, models) = call(&app, "GET", "/v1/models", None, None).await;
+        let ids: Vec<&str> = models["data"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
+        assert!(ids.contains(&"agent/senior-rust"), "{ids:?}");
+
+        let (st, del) = call(&app, "DELETE", "/gateway/admin/agents/senior-rust", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(del["status"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn responses_api_fails_502_when_nothing_connected() {
+        let (app, _d) = app();
+        let body = json!({ "model": "auto", "input": "hi" });
+        assert_eq!(call(&app, "POST", "/v1/responses", Some(body), None).await.0, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn delete_session_returns_not_found_when_missing() {
+        let (app, _d) = app();
+        let (st, resp) = call(&app, "DELETE", "/gateway/admin/sessions/s1", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(resp["status"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn subagents_spawn_list_and_delete_work() {
+        let (app, _d) = app();
+        let (st, spawned) = call(
+            &app,
+            "POST",
+            "/gateway/admin/subagents",
+            Some(json!({ "role": "Reviewer", "model": "auto", "prompt": "Check code" })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let id = spawned["subagent"]["id"].as_str().unwrap().to_string();
+
+        let (st, snap) = call(&app, "GET", "/gateway/admin/activity", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!snap["subagents"].as_array().unwrap().is_empty());
+
+        let (st, del) = call(&app, "DELETE", &format!("/gateway/admin/subagents/{id}"), None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(del["status"], "deleted");
+    }
+}

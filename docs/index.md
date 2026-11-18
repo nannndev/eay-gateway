@@ -30,14 +30,14 @@ features:
     title: Real-time Quotas & Cost Tracking
     details: Inspect remaining percentages, quota reset windows, active subscription tiers, and estimated cost per account through the admin API.
   - icon: ⚡
-    title: Universal Format Translation
-    details: Speaks OpenAI, Anthropic, Gemini, Codex, Command Code, and Kiro formats interchangeably. Streaming and non-streaming responses are fully translated.
+    title: Multi-Protocol & Multimodal
+    details: Speaks /v1/chat/completions, /v1/messages (Anthropic native), /v1/responses, /v1/embeddings, images, and audio. Translates images, PDFs, video, and auto-decodes code/text files.
   - icon: ⛨
-    title: Local & AES-256 Encrypted
-    details: Zero cloud dependency. Binds safely to 127.0.0.1 by default. Stored credentials are encrypted on disk with AES-256-GCM using a local key.
+    title: Budgets, Guardrails & Encryption
+    details: AES-256-GCM encrypted credentials, virtual keys with token/USD budgets, optional secret redaction, context trimming, and --admin-token protection.
   - icon: ◫
-    title: Extensible & Future-Ready
-    details: Written in high-performance Rust. Built with an architecture ready to power future web dashboards, desktop GUI wrappers, and local model bridges.
+    title: Embedded Web Console & Subagents
+    details: Ships with a built-in Deep Dark Monochrome console (/ui), Agent/Skill presets (SKILL.md upload), session memory, and real-time subagent activity SSE.
 ---
 
 <div class="custom-section">
@@ -160,20 +160,20 @@ Client (Cursor, Claude, IDE)
 <div class="roadmap-grid">
   <div class="roadmap-card">
     <span class="tag tag-ready">Current Core</span>
-    <h3>High-Performance Daemon</h3>
-    <p>Zero-dependency Rust binary, AES-256 credential store, cross-format translation, and resilient failover engine.</p>
+    <h3>Daemon &amp; Embedded Web Console</h3>
+    <p>Single Rust binary with AES-256 store, /v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings, multimodal routing, and built-in /ui console.</p>
   </div>
 
   <div class="roadmap-card">
-    <span class="tag tag-progress">In Exploration</span>
-    <h3>Web Admin Interface</h3>
-    <p>A local browser-based dashboard to manage connected accounts, view quota gauges, monitor requests, and test model combos.</p>
+    <span class="tag tag-ready">Current Core</span>
+    <h3>Skills, Agents &amp; Live Activity</h3>
+    <p>Reusable SKILL.md presets, Agent personalities (agent/&lt;name&gt;), session memory, subagent runner, and real-time SSE activity phases.</p>
   </div>
 
   <div class="roadmap-card">
     <span class="tag tag-upcoming">Future Direction</span>
-    <h3>Desktop Tray & Menubar App</h3>
-    <p>Quick toggle from your macOS/Windows menu bar: switch routing presets, see remaining token limits, and view gateway status.</p>
+    <h3>Desktop Tray &amp; Vibecoding Studio</h3>
+    <p>Native macOS/Windows menubar wrapper and workspace-aware AI vibecoding IDE powered directly by eay-gateway-core.</p>
   </div>
 
   <div class="roadmap-card">
