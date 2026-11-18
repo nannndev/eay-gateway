@@ -4,16 +4,30 @@ use crate::providers::{
 };
 use crate::store::{AccountRecord, GatewaySettings, GatewayStore, ProviderRecord, UsageEntry, VirtualKeyRecord};
 use crate::translate::{aggregate_sse, openai_to_anthropic, openai_to_commandcode, SseToOpenAi};
-use axum::{
-    body::{Body, Bytes},
-    http::{header, HeaderValue, StatusCode},
-    response::{IntoResponse, Json, Response},
-};
+use bytes::Bytes;
 use futures::{stream::BoxStream, StreamExt};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Server-sent `chat.completion.chunk` frames, ending with `data: [DONE]`.
+pub type ChatStream = BoxStream<'static, Result<Bytes, std::io::Error>>;
+
+/// What a chat request produced; the HTTP layer turns this into a response.
+pub enum ChatReply {
+    /// `stream: true`: OpenAI-style SSE frames.
+    Stream(ChatStream),
+    /// `stream: false`: one `chat.completion` object.
+    Json(Value),
+}
+
+/// A request the gateway refused or couldn't serve: HTTP status plus an OpenAI-style error body.
+#[derive(Debug)]
+pub struct ChatError {
+    pub status: u16,
+    pub body: Value,
+}
 
 #[derive(Clone)]
 pub struct GatewayEngine {
@@ -33,7 +47,7 @@ impl GatewayEngine {
         Self {
             store: Arc::new(store),
             // Meta (Muse) answers UA-less requests with a 302 to a login page
-            http_client: Client::builder().user_agent("OpenNotchiGateway/1.0").build().unwrap_or_default(),
+            http_client: Client::builder().user_agent(concat!("eay-gateway/", env!("CARGO_PKG_VERSION"))).build().unwrap_or_default(),
             oauth: crate::oauth::OAuthManager::new(),
             rr: Default::default(),
             sticky: Default::default(),
@@ -216,7 +230,7 @@ impl GatewayEngine {
 
     /// Routes one OpenAI-style chat request across the resolved targets, failing over on errors.
     /// `key` is the caller's virtual key, if it presented one.
-    pub async fn chat_completions(&self, key: Option<VirtualKeyRecord>, mut body: Value) -> Result<Response, (StatusCode, Json<Value>)> {
+    pub async fn chat_completions(&self, key: Option<VirtualKeyRecord>, mut body: Value) -> Result<ChatReply, ChatError> {
         let req_model = body.get("model").and_then(|m| m.as_str()).unwrap_or("auto").to_string();
         let wants_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
         let key_name = key.as_ref().map(|k| k.name.clone()).unwrap_or_else(|| "AI Copilot".to_string());
@@ -224,10 +238,7 @@ impl GatewayEngine {
         if let Some(k) = &key {
             if let Some(limit) = k.rate_limit_per_min.filter(|l| *l > 0) {
                 if self.store.key_requests_since(&k.id, crate::store::now() - 60.0) >= limit {
-                    return Err(gateway_err(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        format!("Rate limit of {limit} requests/min reached for key '{}'", k.name),
-                    ));
+                    return Err(gateway_err(429, format!("Rate limit of {limit} requests/min reached for key '{}'", k.name)));
                 }
             }
         }
@@ -237,7 +248,7 @@ impl GatewayEngine {
             // Entries may be provider ids ("codex") or aliases ("cx").
             targets.retain(|t| allowed.iter().any(|a| *a == t.provider || t.public().starts_with(&format!("{a}/"))));
             if targets.is_empty() {
-                return Err(gateway_err(StatusCode::FORBIDDEN, format!("Key '{}' is not allowed to use {req_model}", key_name)));
+                return Err(gateway_err(403, format!("Key '{}' is not allowed to use {req_model}", key_name)));
             }
         }
         let settings = self.store.get_gateway_settings();
@@ -402,29 +413,25 @@ impl GatewayEngine {
             let frames = sse_frames(upstream, tr.clone(), guard);
 
             if wants_stream {
-                let mut resp = Response::new(Body::from_stream(frames));
-                let h = resp.headers_mut();
-                h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-                h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-                return Ok(resp);
+                return Ok(ChatReply::Stream(frames));
             }
             let mut sse = String::new();
             let mut frames = frames;
             while let Some(chunk) = frames.next().await {
                 match chunk {
                     Ok(b) => sse.push_str(&String::from_utf8_lossy(&b)),
-                    Err(e) => return Err(gateway_err(StatusCode::BAD_GATEWAY, e.to_string())),
+                    Err(e) => return Err(gateway_err(502, e.to_string())),
                 }
             }
             drop(frames); // records usage before we read it below
             let usage = tr.lock().usage;
             if let Some(msg) = sse_error(&sse) {
-                return Err(gateway_err(StatusCode::BAD_GATEWAY, msg));
+                return Err(gateway_err(502, msg));
             }
-            return Ok(Json(aggregate_sse(&sse, usage)).into_response());
+            return Ok(ChatReply::Json(aggregate_sse(&sse, usage)));
         }
 
-        Err(gateway_err(StatusCode::BAD_GATEWAY, format!("No connected AI provider could respond: {last_error}")))
+        Err(gateway_err(502, format!("No connected AI provider could respond: {last_error}")))
     }
 }
 
@@ -465,8 +472,8 @@ fn cooldown_for(status: u16, retry_after: Option<u64>, body: &str, default: u64)
     (secs > 0).then(|| secs.min(6 * 3600))
 }
 
-fn gateway_err(status: StatusCode, message: String) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": { "message": message, "type": "gateway_error" } })))
+fn gateway_err(status: u16, message: String) -> ChatError {
+    ChatError { status, body: json!({ "error": { "message": message, "type": "gateway_error" } }) }
 }
 
 /// First in-band error frame of a translated stream, if any.
@@ -516,12 +523,7 @@ impl Drop for UsageGuard {
 }
 
 /// Kiro replies with a binary AWS event stream instead of SSE.
-fn kiro_frames(
-    upstream: reqwest::Response,
-    tr: Arc<parking_lot::Mutex<SseToOpenAi>>,
-    guard: UsageGuard,
-    start: String,
-) -> BoxStream<'static, Result<Bytes, std::io::Error>> {
+fn kiro_frames(upstream: reqwest::Response, tr: Arc<parking_lot::Mutex<SseToOpenAi>>, guard: UsageGuard, start: String) -> ChatStream {
     let state = Arc::new(parking_lot::Mutex::new(crate::kiro::KiroStream::default()));
     let (tr_end, state_end) = (tr.clone(), state.clone());
     let events = upstream.bytes_stream().map(move |item| {
@@ -542,11 +544,7 @@ fn kiro_frames(
 }
 
 /// Turns an upstream SSE body into OpenAI chat.completion.chunk frames, ending with [DONE].
-fn sse_frames(
-    upstream: reqwest::Response,
-    tr: Arc<parking_lot::Mutex<SseToOpenAi>>,
-    guard: UsageGuard,
-) -> BoxStream<'static, Result<Bytes, std::io::Error>> {
+fn sse_frames(upstream: reqwest::Response, tr: Arc<parking_lot::Mutex<SseToOpenAi>>, guard: UsageGuard) -> ChatStream {
     let start = {
         let t = tr.lock();
         if t.kind_passthrough() {

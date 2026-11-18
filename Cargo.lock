@@ -297,6 +297,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "eay-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "eay-gateway-core",
+ "futures",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "eay-gateway-core"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "hex",
+ "parking_lot",
+ "rand",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -947,32 +985,6 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "notchi-gateway"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "futures",
- "hex",
- "http-body-util",
- "parking_lot",
- "rand",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
- "uuid",
 ]
 
 [[package]]

@@ -396,7 +396,7 @@ pub fn spawn_callback_listener(
 
                                     match exchange_res {
                                         Ok(_) => {
-                                            let body = format_oauth_result_page(true, "Your account is now connected to OpenNotchi Gateway.<br>You can close this tab and return to OpenNotchi.");
+                                            let body = format_oauth_result_page(true, "Your account is now connected to eay-gateway.<br>You can close this tab and return to your app.");
                                             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                                             let _ = stream.write_all(resp.as_bytes()).await;
                                             let _ = stream.flush().await;
@@ -682,7 +682,7 @@ pub async fn start_gemini_cli_flow(
     account_id: Option<String>,
 ) -> Result<Value, String> {
     let client_id = store.get_setting("gemini_oauth_client_id").filter(|s| !s.trim().is_empty()).ok_or_else(|| {
-        "Gemini CLI login needs a Google OAuth client ID and secret. Add them in Notchi Gateway › Accounts first.".to_string()
+        "Gemini CLI login needs a Google OAuth client ID and secret. Add them in the gateway settings (Accounts) first.".to_string()
     })?;
 
     let session_id = Uuid::new_v4().to_string();
@@ -2252,7 +2252,7 @@ pub fn subscription_request(
                 .header("Accept", "text/event-stream")
                 .header("HTTP-Referer", "https://cline.bot")
                 .header("X-Title", "Cline")
-                .header("X-CLIENT-TYPE", "notchi-gateway")
+                .header("X-CLIENT-TYPE", "eay-gateway")
                 .header("X-PLATFORM", std::env::consts::OS)
                 .json(&openai_body),
             "openai",
@@ -2305,7 +2305,7 @@ pub fn commandcode_headers(r: reqwest::RequestBuilder, key: &str, session: &str)
         .header("x-cli-environment", "production")
         .header("x-cli-surface", "cli")
         .header("x-taste-learning", "false")
-        .header("x-project-slug", "notchi-gateway")
+        .header("x-project-slug", "eay-gateway")
         .header("x-session-id", session)
 }
 

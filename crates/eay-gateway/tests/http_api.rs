@@ -8,8 +8,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
+use eay_gateway::core::{GatewayEngine, GatewayStore};
+use eay_gateway::gateway_router;
 use http_body_util::BodyExt;
-use notchi_gateway::{gateway_router, GatewayEngine, GatewayStore};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -140,7 +141,7 @@ mod models {
         let (_, models) = call(&app, "GET", "/v1/models", None, None).await;
         let owners: std::collections::HashSet<&str> =
             models["data"].as_array().unwrap().iter().filter_map(|m| m["owned_by"].as_str()).collect();
-        assert_eq!(owners, ["notchi-gateway", "deepseek"].into_iter().collect());
+        assert_eq!(owners, ["eay-gateway", "deepseek"].into_iter().collect());
     }
 }
 

@@ -57,7 +57,7 @@ pub(crate) fn format_oauth_result_page(ok: bool, msg: &str) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenNotchi Gateway — {title}</title>
+  <title>eay-gateway — {title}</title>
   <style>
     :root {{ color-scheme: dark; }}
     * {{ box-sizing: border-box; }}
@@ -176,7 +176,7 @@ pub(crate) fn format_oauth_result_page(ok: bool, msg: &str) -> String {
   </style>
 </head>
 <body>
-  <div class="notch-pill"><span class="dot"></span><span>OpenNotchi Gateway</span></div>
+  <div class="notch-pill"><span class="dot"></span><span>eay-gateway</span></div>
   <div class="card">
     <div class="icon-ring">{icon}</div>
     <h1>{heading}</h1>
@@ -192,12 +192,12 @@ pub(crate) fn format_oauth_result_page(ok: bool, msg: &str) -> String {
         badge_border = if ok { "rgba(52, 211, 153, 0.28)" } else { "rgba(248, 113, 113, 0.28)" },
         h2_color = if ok { "#f4f4f5" } else { "#fca5a5" },
         icon = icon,
-        heading = if ok { "Connected to OpenNotchi" } else { "Connection Failed" },
+        heading = if ok { "Account connected" } else { "Connection Failed" },
         msg = msg,
         footer = if ok {
             r##"<div class="progress"><div class="progress-bar"></div></div><div class="hint">Closing automatically…</div><script>setTimeout(() => { try { window.close(); } catch(e){} }, 1850);</script>"##
         } else {
-            r##"<div class="hint">Return to OpenNotchi Settings and try again.</div>"##
+            r##"<div class="hint">Return to the app you started the login from and try again.</div>"##
         }
     )
 }

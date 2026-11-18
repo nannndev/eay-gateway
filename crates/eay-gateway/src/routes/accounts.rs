@@ -1,10 +1,10 @@
-use crate::engine::{get_oauth_accounts_state, GatewayEngine};
 use crate::error::GatewayError;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
+use eay_gateway_core::engine::{get_oauth_accounts_state, GatewayEngine};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -89,7 +89,7 @@ pub async fn handle_accounts_usage(State(engine): State<GatewayEngine>, Query(q)
     let offset = q.tz_offset_min.unwrap_or(0) * 60;
     let by_provider = engine.store.daily_tokens_by_provider(days, offset);
     let accounts: Vec<_> =
-        engine.store.list_accounts().into_iter().filter(|a| crate::providers::find_oauth_by_id(&a.provider).is_some()).collect();
+        engine.store.list_accounts().into_iter().filter(|a| eay_gateway_core::providers::find_oauth_by_id(&a.provider).is_some()).collect();
     // Paused accounts still show their quota: it's how users decide when to turn them back on.
     let quotas = futures::future::join_all(accounts.iter().map(|a| {
         let engine = engine.clone();
@@ -146,33 +146,42 @@ pub async fn handle_oauth_start(
     }
 
     match provider.as_str() {
-        "copilot" => match crate::oauth::start_copilot_device_flow(&engine.http_client, &engine.oauth, payload.account_id).await {
+        "copilot" => match eay_gateway_core::oauth::start_copilot_device_flow(&engine.http_client, &engine.oauth, payload.account_id).await
+        {
             Ok(val) => (StatusCode::OK, Json(val)),
             Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e, "message": e }))),
         },
         "claude" => {
-            let val = crate::oauth::start_claude_pkce_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id).await;
+            let val =
+                eay_gateway_core::oauth::start_claude_pkce_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id)
+                    .await;
             (StatusCode::OK, Json(val))
         }
         "codex" => {
-            let val = crate::oauth::start_codex_pkce_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id).await;
+            let val =
+                eay_gateway_core::oauth::start_codex_pkce_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id).await;
             (StatusCode::OK, Json(val))
         }
         "antigravity" => {
-            let val = crate::oauth::start_antigravity_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id).await;
+            let val =
+                eay_gateway_core::oauth::start_antigravity_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id)
+                    .await;
             (StatusCode::OK, Json(val))
         }
         "cline" => {
-            let val = crate::oauth::start_cline_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id).await;
+            let val =
+                eay_gateway_core::oauth::start_cline_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id).await;
             (StatusCode::OK, Json(val))
         }
         "gemini-cli" => {
-            match crate::oauth::start_gemini_cli_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id).await {
+            match eay_gateway_core::oauth::start_gemini_cli_flow(&engine.http_client, &engine.oauth, &engine.store, payload.account_id)
+                .await
+            {
                 Ok(val) => (StatusCode::OK, Json(val)),
                 Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e, "message": e }))),
             }
         }
-        _ => match crate::oauth::start_device_flow(&engine.http_client, &engine.oauth, &provider, payload.account_id).await {
+        _ => match eay_gateway_core::oauth::start_device_flow(&engine.http_client, &engine.oauth, &provider, payload.account_id).await {
             Ok(val) => (StatusCode::OK, Json(val)),
             Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e, "message": e }))),
         },
@@ -194,9 +203,9 @@ pub async fn handle_oauth_poll(
     Json(payload): Json<OAuthPollPayload>,
 ) -> (StatusCode, Json<Value>) {
     let polled = if provider == "copilot" {
-        crate::oauth::poll_copilot_device_flow(&engine.http_client, &engine.oauth, &engine.store, &payload.session_id).await
+        eay_gateway_core::oauth::poll_copilot_device_flow(&engine.http_client, &engine.oauth, &engine.store, &payload.session_id).await
     } else {
-        crate::oauth::poll_device_flow(&engine.http_client, &engine.oauth, &engine.store, &payload.session_id).await
+        eay_gateway_core::oauth::poll_device_flow(&engine.http_client, &engine.oauth, &engine.store, &payload.session_id).await
     };
     match polled {
         Ok(res) => {
@@ -242,7 +251,7 @@ pub async fn handle_oauth_complete(
     let target_id = payload.account_id.as_deref();
     let res = match provider.as_str() {
         "claude" => {
-            crate::oauth::complete_claude_pkce_flow(
+            eay_gateway_core::oauth::complete_claude_pkce_flow(
                 &engine.http_client,
                 &engine.oauth,
                 &engine.store,
@@ -253,7 +262,7 @@ pub async fn handle_oauth_complete(
             .await
         }
         "codex" => {
-            crate::oauth::complete_codex_pkce_flow(
+            eay_gateway_core::oauth::complete_codex_pkce_flow(
                 &engine.http_client,
                 &engine.oauth,
                 &engine.store,
@@ -264,7 +273,7 @@ pub async fn handle_oauth_complete(
             .await
         }
         "gemini-cli" => {
-            crate::oauth::complete_gemini_cli_flow(
+            eay_gateway_core::oauth::complete_gemini_cli_flow(
                 &engine.http_client,
                 &engine.oauth,
                 &engine.store,
@@ -274,7 +283,7 @@ pub async fn handle_oauth_complete(
             )
             .await
         }
-        _ => crate::oauth::complete_generic_token_flow(&engine.store, &provider, &payload.callback, target_id).await,
+        _ => eay_gateway_core::oauth::complete_generic_token_flow(&engine.store, &provider, &payload.callback, target_id).await,
     };
 
     match res {
@@ -317,7 +326,7 @@ pub async fn handle_oauth_test(
     };
 
     if let Some(account) = target_account {
-        Json(crate::oauth::test_oauth_account(&engine.http_client, &account).await)
+        Json(eay_gateway_core::oauth::test_oauth_account(&engine.http_client, &account).await)
     } else {
         Json(json!({
             "valid": false,

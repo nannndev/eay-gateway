@@ -1,13 +1,17 @@
-use crate::engine::GatewayEngine;
 use crate::error::GatewayError;
-use crate::providers::{OAUTH_PROVIDERS, PROVIDERS};
-use crate::store::KEY_PREFIX;
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
     http::HeaderMap,
+    http::{header, HeaderValue, StatusCode},
     response::IntoResponse,
+    response::Response,
     Json,
 };
+use eay_gateway_core::engine::ChatReply;
+use eay_gateway_core::engine::GatewayEngine;
+use eay_gateway_core::providers::{OAUTH_PROVIDERS, PROVIDERS};
+use eay_gateway_core::store::KEY_PREFIX;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -33,7 +37,17 @@ pub async fn handle_chat_completions(
         },
         _ => None,
     };
-    engine.chat_completions(key, payload).await.into_response()
+    match engine.chat_completions(key, payload).await {
+        Ok(ChatReply::Stream(frames)) => {
+            let mut resp = Response::new(Body::from_stream(frames));
+            let h = resp.headers_mut();
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            resp
+        }
+        Ok(ChatReply::Json(v)) => Json(v).into_response(),
+        Err(e) => (StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY), Json(e.body)).into_response(),
+    }
 }
 
 pub async fn handle_health() -> Json<Value> {
@@ -44,7 +58,7 @@ pub async fn handle_health() -> Json<Value> {
 /// `owned_by` is the provider id so clients can group the list.
 pub async fn handle_list_models_v1(State(engine): State<GatewayEngine>) -> Json<Value> {
     let mut data: Vec<Value> =
-        engine.auto_model_ids().into_iter().map(|id| json!({ "id": id, "object": "model", "owned_by": "notchi-gateway" })).collect();
+        engine.auto_model_ids().into_iter().map(|id| json!({ "id": id, "object": "model", "owned_by": "eay-gateway" })).collect();
     let settings = engine.store.get_gateway_settings();
     for id in engine.auto_provider_order(&settings) {
         let (alias, seeds) = match (OAUTH_PROVIDERS.iter().find(|o| o.id == id), PROVIDERS.iter().find(|p| p.id == id)) {

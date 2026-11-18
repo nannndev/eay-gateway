@@ -2,11 +2,11 @@ pub mod accounts;
 pub mod admin;
 pub mod providers;
 
-use crate::engine::GatewayEngine;
 use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use eay_gateway_core::engine::GatewayEngine;
 
 /// Builds the Axum router for OpenAI-compatible inference and gateway admin APIs.
 pub fn gateway_router(engine: GatewayEngine) -> Router {
