@@ -399,3 +399,65 @@ mod agents_and_sessions {
         assert_eq!(del["status"], "deleted");
     }
 }
+
+mod mcp_connectors {
+    use super::*;
+
+    #[tokio::test]
+    async fn crud_toggle_and_validation_work() {
+        let (app, _d) = app();
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/gateway/admin/mcp",
+            Some(json!({ "name": "fs", "transport": "stdio" })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+
+        let (st, created) = call(
+            &app,
+            "POST",
+            "/gateway/admin/mcp",
+            Some(json!({
+                "name": "fs",
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(created["mcp_server"]["enabled"], true);
+
+        let (st, list) = call(&app, "GET", "/gateway/admin/mcp", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["mcp_servers"].as_array().unwrap().len(), 1);
+
+        let (st, toggled) = call(&app, "PATCH", "/gateway/admin/mcp/fs/toggle", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(toggled["mcp_server"]["enabled"], false);
+
+        let (st, del) = call(&app, "DELETE", "/gateway/admin/mcp/fs", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(del["status"], "deleted");
+
+        let (st, http_mcp) = call(
+            &app,
+            "POST",
+            "/gateway/admin/mcp",
+            Some(json!({
+                "name": "notion",
+                "transport": "http",
+                "url": "https://mcp.notion.com/mcp",
+                "headers": { "Authorization": "Bearer ntn_test" }
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(http_mcp["mcp_server"]["headers"]["Authorization"], "Bearer ntn_test");
+    }
+}

@@ -51,6 +51,7 @@ Forwards `multipart/form-data` audio uploads (`file`, `model`, …) to connected
 | `x-eay-session-id` | Persist and replay conversation history for this session id in SQLite |
 | `x-eay-max-context-chars` | Trim older non-system messages when total characters exceed this limit |
 | `x-eay-redact` | Set to `true` or `1` to redact common API keys/tokens in user messages before forwarding upstream |
+| `x-eay-mcp` | Comma-separated external MCP server names (or `*` for all enabled) to attach and execute MCP tools automatically |
 
 ### `GET /v1/models`
 
@@ -155,9 +156,14 @@ If `EAY_GATEWAY_ADMIN_TOKEN` (or `--admin-token`) is set, all `/gateway/admin/*`
 | `PUT /gateway/admin/agents/:name` | Create or update agent by name |
 | `DELETE /gateway/admin/agents/:name` | Delete an agent profile |
 | `DELETE /gateway/admin/sessions/:id` | Clear saved conversation history for a session id |
-| `GET /gateway/admin/events` | SSE stream of real-time request & subagent activity phases (`queued`, `preparing`, `routing`, `waiting_upstream`, `thinking`, `calling_tool`, `generating`, `failover`, `completed`, `failed`) |
+| `GET /gateway/admin/events` | SSE stream of real-time request & subagent activity phases (`queued`, `preparing`, `routing`, `waiting_upstream`, `thinking`, `calling_tool`, `generating`, `failover`, `completed`, `failed`), including structured `meta` (`action`, `file`, `lines`, `added`, `removed`, `command`, `duration_ms`) |
 | `GET /gateway/admin/activity` | JSON snapshot of recent `events` and `subagents` |
 | `GET /gateway/admin/subagents` | List active and recent background subagent runs |
 | `POST /gateway/admin/subagents` | Spawn a background subagent `{"role":"Reviewer","model":"auto","prompt":"…","skills":[…]}` |
 | `GET /gateway/admin/subagents/:id` | Get subagent status and output |
 | `DELETE /gateway/admin/subagents/:id` | Remove a subagent entry |
+| `GET /gateway/admin/mcp` | List registered external MCP servers (`stdio` / `http`) |
+| `POST /gateway/admin/mcp` | Save an MCP server (`{"name":"notion","transport":"http","url":"https://mcp.notion.com/mcp","headers":{"Authorization":"Bearer …"}}` or `stdio` with `command`, `args`, `env`) |
+| `PATCH /gateway/admin/mcp/:name/toggle` | Enable / disable an MCP server |
+| `DELETE /gateway/admin/mcp/:name` | Delete an MCP server |
+| `POST /gateway/admin/mcp/:name/tools` | Connect to the MCP server and list its available tools |

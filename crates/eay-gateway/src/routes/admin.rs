@@ -90,7 +90,12 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
         .get("x-eay-redact")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v == "true" || v == "1");
-    ChatOptions { skills, session_id, max_context_chars, redact_secrets, ..Default::default() }
+    let mcp_servers = headers
+        .get("x-eay-mcp")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+    ChatOptions { skills, session_id, max_context_chars, redact_secrets, mcp_servers, ..Default::default() }
 }
 
 /// A presented key must be a valid, enabled virtual key; no key means the local app (anonymous).
@@ -546,6 +551,60 @@ pub async fn handle_get_subagent(State(engine): State<GatewayEngine>, Path(id): 
 pub async fn handle_delete_subagent(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
     let deleted = engine.activity.delete_run(&id);
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
+}
+
+// ---- External MCP Connectors -----------------------------------------
+
+#[derive(Deserialize)]
+pub struct SaveMcpPayload {
+    name: Option<String>,
+    #[serde(default = "default_stdio")]
+    transport: String,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+    url: Option<String>,
+    #[serde(default)]
+    headers: std::collections::HashMap<String, String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_stdio() -> String {
+    "stdio".into()
+}
+
+pub async fn handle_list_mcp(State(engine): State<GatewayEngine>) -> Json<Value> {
+    Json(json!({ "mcp_servers": engine.store.list_mcp_servers() }))
+}
+
+pub async fn handle_save_mcp(State(engine): State<GatewayEngine>, Json(p): Json<SaveMcpPayload>) -> Result<Json<Value>, GatewayError> {
+    let name = p.name.as_deref().unwrap_or("");
+    let rec = engine
+        .store
+        .save_mcp_server(name, &p.transport, p.command.as_deref(), &p.args, &p.env, p.url.as_deref(), &p.headers, p.enabled)
+        .map_err(GatewayError::BadRequest)?;
+    Ok(Json(json!({ "mcp_server": rec })))
+}
+
+pub async fn handle_toggle_mcp(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Result<Json<Value>, GatewayError> {
+    let rec = engine.store.toggle_mcp_server(&name).map_err(GatewayError::NotFound)?;
+    Ok(Json(json!({ "mcp_server": rec })))
+}
+
+pub async fn handle_delete_mcp(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Json<Value> {
+    let deleted = engine.store.delete_mcp_server(&name).unwrap_or(false);
+    Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
+}
+
+pub async fn handle_mcp_tools(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Result<Json<Value>, GatewayError> {
+    let srv = engine.store.get_mcp_server(&name).ok_or_else(|| GatewayError::NotFound("MCP server not found".into()))?;
+    let tools = eay_gateway_core::mcp::list_tools_openai(&engine.http_client, &srv)
+        .await
+        .map_err(GatewayError::BadGateway)?;
+    Ok(Json(json!({ "tools": tools })))
 }
 
 pub async fn handle_toggle_key(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Result<Json<Value>, GatewayError> {

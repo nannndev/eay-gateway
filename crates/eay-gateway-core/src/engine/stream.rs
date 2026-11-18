@@ -58,7 +58,7 @@ impl Drop for UsageGuard {
         if let Some(id) = &self.key_id {
             self.store.touch_virtual_key(id, inp, out);
         }
-        self.activity.emit_phase(
+        self.activity.emit_with_meta(
             &self.run_id,
             self.parent_id.as_deref(),
             self.agent.as_deref(),
@@ -66,6 +66,7 @@ impl Drop for UsageGuard {
             format!("Completed ({} tokens, {} ms)", inp + out, duration_ms),
             Some(&self.target),
             None,
+            Some(super::activity::ActivityMeta { duration_ms: Some(duration_ms), ..Default::default() }),
         );
     }
 }

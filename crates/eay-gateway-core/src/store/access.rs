@@ -1,4 +1,4 @@
-use super::{hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, SkillRecord, VirtualKeyRecord, KEY_PREFIX};
+use super::{hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, McpServerRecord, SkillRecord, VirtualKeyRecord, KEY_PREFIX};
 use rusqlite::params;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -343,6 +343,101 @@ impl GatewayStore {
     pub fn delete_session(&self, id: &str) -> Result<bool, String> {
         let conn = self.conn.lock();
         let rows = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+        Ok(rows > 0)
+    }
+
+    // ---- External MCP Servers --------------------------------------
+    pub fn list_mcp_servers(&self) -> Vec<McpServerRecord> {
+        let conn = self.conn.lock();
+        query_rows(
+            &conn,
+            "SELECT name, transport, command, args, env, url, enabled, updated_at, headers FROM mcp_servers ORDER BY name ASC",
+            [],
+            |r| {
+                let args_json: String = r.get(3)?;
+                let env_json: String = r.get(4)?;
+                let headers_json: String = r.get(8).unwrap_or_else(|_| "{}".into());
+                Ok(McpServerRecord {
+                    name: r.get(0)?,
+                    transport: r.get(1)?,
+                    command: r.get(2)?,
+                    args: serde_json::from_str(&args_json).unwrap_or_default(),
+                    env: serde_json::from_str(&env_json).unwrap_or_default(),
+                    url: r.get(5)?,
+                    headers: serde_json::from_str(&headers_json).unwrap_or_default(),
+                    enabled: r.get::<_, i64>(6)? != 0,
+                    updated_at: r.get(7)?,
+                })
+            },
+        )
+    }
+
+    pub fn get_mcp_server(&self, name: &str) -> Option<McpServerRecord> {
+        self.list_mcp_servers().into_iter().find(|m| m.name == name)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_mcp_server(
+        &self,
+        name: &str,
+        transport: &str,
+        command: Option<&str>,
+        args: &[String],
+        env: &HashMap<String, String>,
+        url: Option<&str>,
+        headers: &HashMap<String, String>,
+        enabled: bool,
+    ) -> Result<McpServerRecord, String> {
+        let name = name.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err("MCP server name must be non-empty and use only letters, digits, '-' or '_'".into());
+        }
+        let transport = match transport.trim() {
+            "stdio" | "http" => transport.trim(),
+            other => return Err(format!("Unsupported MCP transport '{other}'; use 'stdio' or 'http'")),
+        };
+        if transport == "stdio" && command.map(str::trim).unwrap_or("").is_empty() {
+            return Err("MCP stdio server requires 'command'".into());
+        }
+        if transport == "http" && url.map(str::trim).unwrap_or("").is_empty() {
+            return Err("MCP http server requires 'url'".into());
+        }
+        let args_json = serde_json::to_string(args).map_err(|e| e.to_string())?;
+        let env_json = serde_json::to_string(env).map_err(|e| e.to_string())?;
+        let headers_json = serde_json::to_string(headers).map_err(|e| e.to_string())?;
+        let updated_at = now();
+        let cmd_clean = command.map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        let url_clean = url.map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO mcp_servers (name, transport, command, args, env, url, headers, enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![name, transport, cmd_clean, args_json, env_json, url_clean, headers_json, i64::from(enabled), updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(McpServerRecord {
+            name: name.to_string(),
+            transport: transport.to_string(),
+            command: cmd_clean,
+            args: args.to_vec(),
+            env: env.clone(),
+            url: url_clean,
+            headers: headers.clone(),
+            enabled,
+            updated_at,
+        })
+    }
+
+    pub fn toggle_mcp_server(&self, name: &str) -> Result<McpServerRecord, String> {
+        let conn = self.conn.lock();
+        conn.execute("UPDATE mcp_servers SET enabled = 1 - enabled, updated_at = ?1 WHERE name = ?2", params![now(), name])
+            .map_err(|e| e.to_string())?;
+        drop(conn);
+        self.get_mcp_server(name).ok_or_else(|| "MCP server not found".to_string())
+    }
+
+    pub fn delete_mcp_server(&self, name: &str) -> Result<bool, String> {
+        let conn = self.conn.lock();
+        let rows = conn.execute("DELETE FROM mcp_servers WHERE name = ?1", params![name]).map_err(|e| e.to_string())?;
         Ok(rows > 0)
     }
 

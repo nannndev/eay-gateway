@@ -5,6 +5,7 @@
 pub mod cipher;
 pub mod engine;
 pub mod kiro;
+pub mod mcp;
 pub mod models;
 pub mod oauth;
 pub mod pricing;

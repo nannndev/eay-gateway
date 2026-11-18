@@ -149,6 +149,21 @@ pub struct AgentProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerRecord {
+    pub name: String,
+    /// "stdio" or "http"
+    pub transport: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    pub enabled: bool,
+    pub updated_at: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewaySettings {
     /// "priority" (ordered fallback), "round_robin", or "fill_first" (sticky until it fails).
     pub routing_strategy: String,

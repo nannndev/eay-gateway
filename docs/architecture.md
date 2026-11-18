@@ -10,6 +10,7 @@ crates/
 │   ├── cipher.rs          AES-256-GCM for secrets at rest
 │   ├── engine/            orchestrator (mod), routing, stream/usage guard, guardrails, activity & subagents, state
 │   ├── translate/         multimodal media, OpenAI ⇄ Anthropic, Codex Responses, Gemini, Command Code; SSE translators
+│   ├── mcp.rs             external MCP JSON-RPC client (stdio & Streamable HTTP)
 │   ├── kiro.rs            Kiro request format and AWS event-stream decoder (CRC-checked)
 │   ├── oauth/             logins (browser, device code, imports), token refresh, per-provider requests
 │   ├── quota.rs           live usage windows per account, cached, keep-last-good
@@ -62,6 +63,7 @@ One SQLite file, `gateway.db`:
 | `skills` | Context/Skill presets: name, description, prompt, enabled |
 | `agents` | Agent Personality profiles: model, skills, personality, temperature, max_tokens |
 | `sessions` | Conversation memory keyed by `x-eay-session-id` |
+| `mcp_servers` | External MCP connectors (`stdio` command/args/env or `http` url/headers) |
 | `settings` | Routing settings, Gemini OAuth client |
 
 Secrets (`providers.api_key`, `accounts.secret`) are AES-256-GCM encrypted with `gateway.key`.

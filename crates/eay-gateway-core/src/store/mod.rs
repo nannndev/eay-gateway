@@ -7,7 +7,7 @@ mod usage;
 #[cfg(test)]
 mod tests;
 
-pub use models::{AccountRecord, AgentProfile, GatewaySettings, ProviderRecord, SkillRecord, UsageEntry, VirtualKeyRecord};
+pub use models::{AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProviderRecord, SkillRecord, UsageEntry, VirtualKeyRecord};
 
 use crate::cipher::Cipher;
 use parking_lot::Mutex;
@@ -122,6 +122,12 @@ impl GatewayStore {
               id TEXT PRIMARY KEY, messages TEXT NOT NULL DEFAULT '[]',
               updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+              name TEXT PRIMARY KEY, transport TEXT NOT NULL DEFAULT 'stdio',
+              command TEXT, args TEXT NOT NULL DEFAULT '[]',
+              env TEXT NOT NULL DEFAULT '{}', url TEXT,
+              enabled INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL
+            );
             "#,
         )
         .map_err(|e| format!("Failed to init gateway schema: {}", e))?;
@@ -129,6 +135,7 @@ impl GatewayStore {
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN default_skills TEXT", []);
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN max_tokens_budget INTEGER", []);
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN max_cost_usd REAL", []);
+        let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN headers TEXT NOT NULL DEFAULT '{}'", []);
         let _ = conn.execute("ALTER TABLE providers ADD COLUMN synced_models TEXT", []);
         let _ = conn.execute("ALTER TABLE providers ADD COLUMN models_synced_at REAL", []);
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN cached_tokens INTEGER", []);

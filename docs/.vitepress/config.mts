@@ -3,6 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'eay-gateway',
   description: 'One local, OpenAI-compatible endpoint for all your AI subscriptions and API keys.',
+  base: process.env.DOCS_BASE || '/',
   appearance: 'force-dark',
   head: [
     ['link', { rel: 'icon', href: '/logo.svg' }],
@@ -28,6 +29,7 @@ export default defineConfig({
           { text: 'HTTP API', link: '/api' },
           { text: 'Architecture', link: '/architecture' },
           { text: 'Development', link: '/development' },
+          { text: 'Changelog', link: '/changelog' },
         ],
       },
     ],
@@ -52,6 +54,7 @@ export default defineConfig({
           { text: 'HTTP & Admin API', link: '/api' },
           { text: 'Architecture & Storage', link: '/architecture' },
           { text: 'Development & Testing', link: '/development' },
+          { text: 'Changelog', link: '/changelog' },
         ],
       },
     ],

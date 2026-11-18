@@ -111,6 +111,11 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/activity", get(admin::handle_activity_snapshot))
         .route("/gateway/admin/subagents", get(admin::handle_list_subagents).post(admin::handle_spawn_subagent))
         .route("/gateway/admin/subagents/:id", get(admin::handle_get_subagent).delete(admin::handle_delete_subagent))
+        // External MCP Connectors
+        .route("/gateway/admin/mcp", get(admin::handle_list_mcp).post(admin::handle_save_mcp))
+        .route("/gateway/admin/mcp/:name", delete(admin::handle_delete_mcp))
+        .route("/gateway/admin/mcp/:name/toggle", patch(admin::handle_toggle_mcp))
+        .route("/gateway/admin/mcp/:name/tools", post(admin::handle_mcp_tools))
         // Models, Usage, Stats, Settings
         .route("/gateway/admin/models", get(admin::handle_admin_models))
         .route("/gateway/admin/usage", get(admin::handle_list_usage).delete(admin::handle_clear_usage))

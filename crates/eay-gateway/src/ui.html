@@ -34,7 +34,7 @@
     }
     header {
       position: sticky; top: 0; z-index: 20;
-      display: flex; align-items: center; justify-content: space-between;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
       padding: 12px 24px;
       background: rgba(5,5,5,0.88);
       backdrop-filter: blur(12px);
@@ -45,30 +45,30 @@
       font-family: var(--mono); font-size: 11px; color: var(--muted);
       padding: 2px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface);
     }
-    nav { display: flex; gap: 6px; flex-wrap: wrap; }
+    nav { display: flex; gap: 5px; flex-wrap: wrap; }
     .tab-btn {
       background: transparent; color: var(--muted); border: 1px solid transparent;
-      padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500;
+      padding: 6px 11px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500;
     }
     .tab-btn:hover { color: var(--text); background: var(--surface); }
     .tab-btn.active { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
-    main { max-width: 1120px; margin: 28px auto; padding: 0 20px 60px; }
+    main { max-width: 1140px; margin: 24px auto; padding: 0 20px 60px; }
     .panel { display: none; }
     .panel.active { display: block; }
-    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 24px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
     .card {
-      background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 18px;
     }
-    .stat-label { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--mono); }
+    .stat-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--mono); }
     .stat-val { font-size: 26px; font-weight: 700; margin-top: 6px; letter-spacing: -0.03em; }
-    h2 { font-size: 16px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.01em; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.01em; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     input, textarea, select {
       background: var(--bg); color: var(--text); border: 1px solid var(--border);
       border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit;
     }
     input:focus, textarea:focus, select:focus { outline: none; border-color: var(--border-hi); }
-    textarea { width: 100%; min-height: 80px; resize: vertical; font-family: var(--mono); font-size: 12px; }
+    textarea { width: 100%; min-height: 84px; resize: vertical; font-family: var(--mono); font-size: 12px; }
     .btn {
       background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent);
       padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
@@ -76,11 +76,11 @@
     .btn:hover { opacity: 0.9; }
     .btn-ghost {
       background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
-      padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+      padding: 5px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
     }
     .btn-ghost:hover { border-color: var(--border-hi); }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+    th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); }
     th { color: var(--dim); font-family: var(--mono); font-size: 11px; text-transform: uppercase; font-weight: 600; }
     .pill {
       display: inline-block; padding: 2px 7px; border-radius: 4px; font-family: var(--mono);
@@ -88,14 +88,15 @@
     }
     .pill.on { background: #fff; color: #050505; border-color: #fff; font-weight: 600; }
     .mono { font-family: var(--mono); font-size: 12px; }
-    .secret-box {
-      margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border-hi);
+    .box {
+      margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border-hi);
       border-radius: 6px; background: var(--surface-2); font-family: var(--mono); font-size: 12px; word-break: break-all;
     }
     pre {
       background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
       padding: 14px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; margin: 12px 0 0;
     }
+    a { color: #fff; }
   </style>
 </head>
 <body>
@@ -114,10 +115,12 @@
     <nav>
       <button class="tab-btn active" data-tab="overview">Overview</button>
       <button class="tab-btn" data-tab="providers">Providers</button>
+      <button class="tab-btn" data-tab="routing">Routing</button>
       <button class="tab-btn" data-tab="skills">Skills</button>
       <button class="tab-btn" data-tab="agents">Agents</button>
-      <button class="tab-btn" data-tab="subagents">Subagents &amp; Activity</button>
-      <button class="tab-btn" data-tab="keys">Virtual Keys</button>
+      <button class="tab-btn" data-tab="subagents">Activity</button>
+      <button class="tab-btn" data-tab="mcp">MCP</button>
+      <button class="tab-btn" data-tab="keys">Keys</button>
       <button class="tab-btn" data-tab="playground">Playground</button>
     </nav>
   </header>
@@ -138,25 +141,35 @@
       </div>
     </section>
 
-    <!-- PROVIDERS -->
+    <!-- PROVIDERS & OAUTH ACCOUNTS -->
     <section id="tab-providers" class="panel">
-      <div class="card" style="margin-bottom: 18px;">
+      <div class="card">
+        <h2>Connect Subscription (OAuth Login)</h2>
+        <div class="row">
+          <select id="oauth-provider" style="min-width: 220px;"></select>
+          <button class="btn" onclick="startOAuth()">Start OAuth Login</button>
+          <button class="btn-ghost" onclick="loadOAuthUsage()">Refresh Quotas</button>
+        </div>
+        <div id="oauth-flow" class="box" style="display: none;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Subscription Accounts &amp; Live Quotas</h2>
+        <table>
+          <thead><tr><th>Provider</th><th>Account</th><th>Plan</th><th>Quota</th><th>Status</th><th></th></tr></thead>
+          <tbody id="accounts-body"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
         <h2>Connect API-Key Provider</h2>
         <div class="row">
           <select id="conn-provider"></select>
-          <input id="conn-key" type="password" placeholder="API Key (sk-...)" style="flex: 1; min-width: 220px;" />
-          <input id="conn-url" placeholder="Optional Base URL (Azure / custom)" style="min-width: 220px;" />
+          <input id="conn-key" type="password" placeholder="API Key (sk-...)" style="flex: 1; min-width: 200px;" />
+          <input id="conn-url" placeholder="Optional Base URL (Azure / custom)" style="min-width: 200px;" />
           <button class="btn" onclick="connectProvider()">Connect</button>
         </div>
         <div id="conn-msg" class="mono" style="margin-top: 8px; color: var(--muted);"></div>
-      </div>
-
-      <div class="card" style="margin-bottom: 18px;">
-        <h2>OAuth Subscription Accounts</h2>
-        <table>
-          <thead><tr><th>Provider</th><th>Label / Email</th><th>Plan</th><th>Status</th><th></th></tr></thead>
-          <tbody id="accounts-body"></tbody>
-        </table>
       </div>
 
       <div class="card">
@@ -168,9 +181,50 @@
       </div>
     </section>
 
+    <!-- ROUTING & COMBOS -->
+    <section id="tab-routing" class="panel">
+      <div class="card">
+        <h2>Routing Settings</h2>
+        <div class="row">
+          <label class="mono">Strategy:
+            <select id="rt-strategy">
+              <option value="priority">priority</option>
+              <option value="round_robin">round_robin</option>
+              <option value="fill_first">fill_first</option>
+            </select>
+          </label>
+          <label class="mono">Fallback:
+            <select id="rt-fallback">
+              <option value="model_first">model_first</option>
+              <option value="account_first">account_first</option>
+            </select>
+          </label>
+          <label class="mono">Cooldown (s):
+            <input id="rt-cooldown" type="number" style="width: 85px;" />
+          </label>
+          <input id="rt-priority" placeholder="Provider priority (comma-sep, e.g. claude,codex,deepseek)" style="flex: 1; min-width: 240px;" />
+          <button class="btn" onclick="saveSettings()">Save</button>
+        </div>
+        <div id="rt-msg" class="mono" style="margin-top: 8px; color: var(--muted);"></div>
+      </div>
+
+      <div class="card">
+        <h2>Model Combos (<span class="mono">auto/&lt;name&gt;</span>)</h2>
+        <div class="row" style="margin-bottom: 12px;">
+          <input id="cb-name" placeholder="Combo name (e.g. coding)" />
+          <input id="cb-targets" placeholder="Targets (comma-sep, e.g. cx/gpt-5.5, claude/auto, ds/auto)" style="flex: 1;" />
+          <button class="btn" onclick="saveCombo()">Save Combo</button>
+        </div>
+        <table>
+          <thead><tr><th>Model ID</th><th>Targets</th><th></th></tr></thead>
+          <tbody id="combos-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- SKILLS -->
     <section id="tab-skills" class="panel">
-      <div class="card" style="margin-bottom: 18px;">
+      <div class="card">
         <h2>Create / Update Skill (Context Preset)</h2>
         <div class="row" style="margin-bottom: 10px;">
           <input id="skill-name" placeholder="Name (e.g. rust-expert)" />
@@ -192,9 +246,9 @@
       </div>
     </section>
 
-    <!-- AGENTS (PERSONALITIES) -->
+    <!-- AGENTS -->
     <section id="tab-agents" class="panel">
-      <div class="card" style="margin-bottom: 18px;">
+      <div class="card">
         <h2>Create / Update Agent Profile (Personality + Model + Skills)</h2>
         <div class="row" style="margin-bottom: 10px;">
           <input id="ag-name" placeholder="Agent name (e.g. senior-rust)" />
@@ -221,7 +275,7 @@
 
     <!-- SUBAGENTS & LIVE ACTIVITY -->
     <section id="tab-subagents" class="panel">
-      <div class="card" style="margin-bottom: 18px;">
+      <div class="card">
         <h2>Spawn Subagent</h2>
         <div class="row" style="margin-bottom: 10px;">
           <input id="sub-role" placeholder="Role (e.g. Code Reviewer)" />
@@ -235,7 +289,7 @@
         </div>
       </div>
 
-      <div class="card" style="margin-bottom: 18px;">
+      <div class="card">
         <h2>Active &amp; Recent Subagents</h2>
         <table>
           <thead><tr><th>Role</th><th>Phase</th><th>Status / Action</th><th>Target</th><th>Output</th><th></th></tr></thead>
@@ -252,19 +306,55 @@
       </div>
     </section>
 
+    <!-- EXTERNAL MCP CONNECTORS -->
+    <section id="tab-mcp" class="panel">
+      <div class="card">
+        <div class="row" style="justify-content: space-between; margin-bottom: 10px;">
+          <h2 style="margin: 0;">Connect External MCP Server</h2>
+          <div class="row">
+            <button class="btn-ghost" onclick="fillMcpPreset('fs')">Preset: Filesystem (Desktop)</button>
+            <button class="btn-ghost" onclick="fillMcpPreset('notion')">Preset: Notion (HTTP)</button>
+            <button class="btn-ghost" onclick="fillMcpPreset('github')">Preset: GitHub (stdio)</button>
+          </div>
+        </div>
+        <div class="row" style="margin-bottom: 10px;">
+          <input id="mcp-name" placeholder="Name (e.g. filesystem)" />
+          <select id="mcp-transport" onchange="toggleMcpTransport()">
+            <option value="stdio">stdio (local command)</option>
+            <option value="http">http (JSON-RPC URL)</option>
+          </select>
+          <input id="mcp-cmd" placeholder="Command (e.g. npx)" style="min-width: 120px;" />
+          <input id="mcp-args" placeholder="Args (space-sep)" style="flex: 1;" />
+          <input id="mcp-url" placeholder="HTTP URL (e.g. https://mcp.notion.com/mcp)" style="flex: 1; display: none;" />
+          <button class="btn" onclick="saveMcp()">Save MCP</button>
+        </div>
+        <div class="row">
+          <input id="mcp-kv" placeholder='Optional Env (stdio) or Headers (http) JSON, e.g. {"Authorization":"Bearer ..."}' style="flex: 1; font-family: var(--mono); font-size: 12px;" />
+        </div>
+        <div id="mcp-msg" class="mono" style="margin-top: 8px; color: var(--muted);"></div>
+      </div>
+      <div class="card">
+        <h2>Connected MCP Servers (use <span class="mono">x-eay-mcp: *</span> or server name)</h2>
+        <table>
+          <thead><tr><th>Name</th><th>Transport</th><th>Target</th><th>Status</th><th></th></tr></thead>
+          <tbody id="mcp-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- VIRTUAL KEYS -->
     <section id="tab-keys" class="panel">
-      <div class="card" style="margin-bottom: 18px;">
+      <div class="card">
         <h2>Create Virtual Key</h2>
         <div class="row">
           <input id="key-name" placeholder="Key name (e.g. cursor-work)" />
-          <input id="key-rpm" type="number" placeholder="Req / min" style="width: 110px;" />
-          <input id="key-tok" type="number" placeholder="Token budget" style="width: 130px;" />
-          <input id="key-usd" type="number" step="0.01" placeholder="USD budget" style="width: 120px;" />
+          <input id="key-rpm" type="number" placeholder="Req / min" style="width: 105px;" />
+          <input id="key-tok" type="number" placeholder="Token budget" style="width: 125px;" />
+          <input id="key-usd" type="number" step="0.01" placeholder="USD budget" style="width: 115px;" />
           <input id="key-skills" placeholder="Default skills (comma-sep)" style="flex: 1;" />
           <button class="btn" onclick="createKey()">Create Key</button>
         </div>
-        <div id="new-key-secret" class="secret-box" style="display: none;"></div>
+        <div id="new-key-secret" class="box" style="display: none;"></div>
       </div>
       <div class="card">
         <h2>Virtual Keys</h2>
@@ -278,13 +368,19 @@
     <!-- PLAYGROUND -->
     <section id="tab-playground" class="panel">
       <div class="card">
-        <h2>Chat Playground (<span class="mono">/v1/chat/completions</span>)</h2>
+        <div class="row" style="justify-content: space-between; margin-bottom: 10px;">
+          <h2 style="margin: 0;">Chat Playground (<span class="mono">/v1/chat/completions</span>)</h2>
+          <span id="pg-status" class="pill">idle</span>
+        </div>
         <div class="row" style="margin-bottom: 10px;">
           <select id="pg-model" style="min-width: 240px;"></select>
           <input id="pg-skills" placeholder="Skills (e.g. rust-expert)" style="flex: 1;" />
-          <input id="pg-session" placeholder="Session ID (memory)" style="width: 160px;" />
+          <input id="pg-session" placeholder="Session ID (memory)" style="width: 150px;" />
           <label class="row" style="gap: 5px; font-size: 12px; color: var(--muted);">
-            <input type="checkbox" id="pg-redact" /> Redact Secrets
+            <input type="checkbox" id="pg-redact" /> Redact
+          </label>
+          <label class="row" style="gap: 5px; font-size: 12px; color: var(--muted);">
+            <input type="checkbox" id="pg-mcp" /> Use MCP (*)
           </label>
           <button class="btn" onclick="sendPlayground()">Send</button>
         </div>
@@ -308,13 +404,16 @@
         document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
         btn.classList.add('active');
         document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-        if (btn.dataset.tab === 'overview') loadOverview();
-        if (btn.dataset.tab === 'providers') loadProviders();
-        if (btn.dataset.tab === 'skills') loadSkills();
-        if (btn.dataset.tab === 'agents') loadAgents();
-        if (btn.dataset.tab === 'subagents') { loadSubagents(); connectActivityStream(); }
-        if (btn.dataset.tab === 'keys') loadKeys();
-        if (btn.dataset.tab === 'playground') loadModels();
+        const t = btn.dataset.tab;
+        if (t === 'overview') loadOverview();
+        if (t === 'providers') loadProviders();
+        if (t === 'routing') loadRouting();
+        if (t === 'skills') loadSkills();
+        if (t === 'agents') loadAgents();
+        if (t === 'subagents') { loadSubagents(); connectActivityStream(); }
+        if (t === 'mcp') loadMcp();
+        if (t === 'keys') loadKeys();
+        if (t === 'playground') { loadModels(); connectActivityStream(); }
       };
     });
 
@@ -326,14 +425,10 @@
         ['Total Tokens', ((st.input_tokens || 0) + (st.output_tokens || 0)).toLocaleString()],
         ['Active Keys', st.active_keys ?? 0],
         ['Connected Providers', st.connected_providers ?? 0],
-      ].map(([k, v]) => `<div class="card"><div class="stat-label">${k}</div><div class="stat-val">${v}</div></div>`).join('');
+      ].map(([k, v]) => `<div class="card" style="margin:0"><div class="stat-label">${k}</div><div class="stat-val">${v}</div></div>`).join('');
 
-      const fmtTime = (ts) => {
-        if (!ts) return '-';
-        const d = new Date(ts * 1000);
-        return `<span title="${d.toLocaleString()}">${d.toLocaleTimeString()}</span>`;
-      };
-      const rows = (u.data.usage || []).map(x => `
+      const fmtTime = (ts) => ts ? `<span title="${new Date(ts*1000).toLocaleString()}">${new Date(ts*1000).toLocaleTimeString()}</span>` : '-';
+      document.getElementById('usage-body').innerHTML = (u.data.usage || []).map(x => `
         <tr>
           <td class="mono">${fmtTime(x.ts)}</td>
           <td class="mono">${x.model || 'auto'}</td>
@@ -341,10 +436,10 @@
           <td class="mono">${(x.input_tokens || 0) + (x.output_tokens || 0)}</td>
           <td class="mono">${x.duration_ms || 0} ms</td>
           <td><span class="pill ${x.status === 'success' ? 'on' : ''}">${x.status}</span></td>
-        </tr>`).join('');
-      document.getElementById('usage-body').innerHTML = rows || '<tr><td colspan="6" style="color:var(--dim)">No requests yet.</td></tr>';
+        </tr>`).join('') || '<tr><td colspan="6" style="color:var(--dim)">No requests yet.</td></tr>';
     }
 
+    let usageMap = {};
     async function loadProviders() {
       const [p, a] = await Promise.all([api('/gateway/admin/providers'), api('/gateway/admin/accounts')]);
       const plist = p.data.providers || [];
@@ -356,22 +451,69 @@
           <td><span class="pill ${x.enabled ? 'on' : ''}">${x.enabled ? 'enabled' : 'disabled'}</span></td>
           <td class="mono">${(x.models || []).length} models</td>
           <td class="row">
+            <button class="btn-ghost" onclick="syncModels('${x.id}')">Sync</button>
             <button class="btn-ghost" onclick="toggleProvider('${x.id}')">Toggle</button>
             ${x.needs_key ? `<button class="btn-ghost" onclick="disconnectProvider('${x.id}')">Disconnect</button>` : ''}
           </td>
         </tr>`).join('') || '<tr><td colspan="5" style="color:var(--dim)">No API-key providers connected.</td></tr>';
 
-      const alist = a.data.accounts || [];
-      document.getElementById('accounts-body').innerHTML = alist.map(x => `
+      const oplist = a.data.providers || [];
+      document.getElementById('oauth-provider').innerHTML = oplist.map(x => `<option value="${x.id}">${x.name} (${x.alias})</option>`).join('');
+      renderAccounts(a.data.accounts || []);
+    }
+    function renderAccounts(alist) {
+      document.getElementById('accounts-body').innerHTML = alist.map(x => {
+        const u = usageMap[x.id];
+        const q = u && u.quotas && u.quotas.length ? u.quotas.map(w => `${w.name}: ${w.remaining_percentage ?? '-'}%`).join(', ') : (u?.quota_message || '-');
+        return `
         <tr>
           <td class="mono">${x.provider}</td>
           <td>${x.label || x.email || x.id}</td>
           <td class="mono">${x.plan || '-'}</td>
+          <td class="mono">${q}</td>
           <td><span class="pill ${x.enabled ? 'on' : ''}">${x.enabled ? 'enabled' : 'disabled'}</span></td>
-          <td><button class="btn-ghost" onclick="toggleAccount('${x.provider}','${x.id}')">Toggle</button></td>
-        </tr>`).join('') || '<tr><td colspan="5" style="color:var(--dim)">No OAuth accounts connected.</td></tr>';
+          <td class="row">
+            <button class="btn-ghost" onclick="testAccount('${x.provider}','${x.id}')">Test</button>
+            <button class="btn-ghost" onclick="toggleAccount('${x.provider}','${x.id}')">Toggle</button>
+            <button class="btn-ghost" onclick="deleteAccount('${x.provider}','${x.id}')">Delete</button>
+          </td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="6" style="color:var(--dim)">No OAuth accounts connected.</td></tr>';
     }
-
+    async function loadOAuthUsage() {
+      const r = await api('/gateway/admin/accounts/usage?force=true');
+      usageMap = {};
+      (r.data.accounts || []).forEach(u => { usageMap[u.id] = u; });
+      const a = await api('/gateway/admin/accounts');
+      renderAccounts(a.data.accounts || []);
+    }
+    async function startOAuth() {
+      const p = document.getElementById('oauth-provider').value;
+      const box = document.getElementById('oauth-flow');
+      box.style.display = 'block';
+      box.textContent = `Starting ${p} login...`;
+      const r = await api(`/gateway/admin/accounts/${p}/start`, { method: 'POST', body: '{}' });
+      if (!r.ok) { box.textContent = r.data?.detail || JSON.stringify(r.data); return; }
+      const d = r.data;
+      if (d.kind === 'device') {
+        box.innerHTML = `Open <a href="${d.verification_uri}" target="_blank">${d.verification_uri}</a> and enter code: <strong>${d.user_code}</strong> <span id="oauth-poll-st">(waiting...)</span>`;
+        const timer = setInterval(async () => {
+          const pr = await api(`/gateway/admin/accounts/${p}/poll`, { method: 'POST', body: JSON.stringify({ session_id: d.session_id }) });
+          if (pr.data?.status === 'done') { clearInterval(timer); box.textContent = `Connected ${p}!`; loadProviders(); }
+          if (pr.data?.status === 'expired') { clearInterval(timer); box.textContent = 'Login expired. Try again.'; }
+        }, (d.interval || 3) * 1000);
+      } else {
+        box.innerHTML = `1. Open <a href="${d.auth_url}" target="_blank">Authorize ${p}</a><br>2. If not auto-completed, paste callback URL/code: <div class="row" style="margin-top:6px"><input id="oauth-cb" style="flex:1" placeholder="http://localhost:.../callback?code=..." /><button class="btn-ghost" onclick="completeOAuth('${p}','${d.session_id}')">Complete</button></div>`;
+      }
+    }
+    async function completeOAuth(p, sid) {
+      const cb = document.getElementById('oauth-cb').value.trim();
+      const r = await api(`/gateway/admin/accounts/${p}/complete`, { method: 'POST', body: JSON.stringify({ session_id: sid, callback: cb }) });
+      document.getElementById('oauth-flow').textContent = r.ok ? `Connected ${p}!` : (r.data?.detail || JSON.stringify(r.data));
+      if (r.ok) loadProviders();
+    }
+    async function testAccount(p, id) { const r = await api(`/gateway/admin/accounts/${p}/test`, { method: 'POST', body: JSON.stringify({ account_id: id }) }); alert(JSON.stringify(r.data)); }
+    async function deleteAccount(p, id) { await api(`/gateway/admin/accounts/${p}/${id}`, { method: 'DELETE' }); loadProviders(); }
     async function connectProvider() {
       const id = document.getElementById('conn-provider').value;
       const api_key = document.getElementById('conn-key').value.trim();
@@ -381,9 +523,41 @@
       document.getElementById('conn-msg').textContent = r.ok ? `Connected ${id}!` : (r.data?.detail || JSON.stringify(r.data));
       if (r.ok) { document.getElementById('conn-key').value = ''; loadProviders(); }
     }
+    async function syncModels(id) { await api(`/gateway/admin/providers/${id}/models/sync`, { method: 'POST', body: '{}' }); loadProviders(); }
     async function toggleProvider(id) { await api(`/gateway/admin/providers/${id}/toggle`, { method: 'PATCH', body: '{}' }); loadProviders(); }
     async function disconnectProvider(id) { await api(`/gateway/admin/providers/${id}/disconnect`, { method: 'POST', body: '{}' }); loadProviders(); }
     async function toggleAccount(p, id) { await api(`/gateway/admin/accounts/${p}/${id}/toggle`, { method: 'PATCH', body: '{}' }); loadProviders(); }
+
+    async function loadRouting() {
+      const [s, c] = await Promise.all([api('/gateway/admin/settings'), api('/gateway/admin/combos')]);
+      const st = s.data.settings || {};
+      document.getElementById('rt-strategy').value = st.routing_strategy || 'priority';
+      document.getElementById('rt-fallback').value = st.fallback_order || 'model_first';
+      document.getElementById('rt-cooldown').value = st.cooldown_secs ?? 60;
+      document.getElementById('rt-priority').value = (st.provider_priority || []).join(', ');
+      const combos = c.data.combos || {};
+      document.getElementById('combos-body').innerHTML = Object.entries(combos).map(([name, targets]) => `
+        <tr>
+          <td class="mono">auto/${name}</td>
+          <td class="mono">${(targets || []).join(', ')}</td>
+          <td><button class="btn-ghost" onclick="deleteCombo('${name}')">Delete</button></td>
+        </tr>`).join('') || '<tr><td colspan="3" style="color:var(--dim)">No combos saved.</td></tr>';
+    }
+    async function saveSettings() {
+      const routing_strategy = document.getElementById('rt-strategy').value;
+      const fallback_order = document.getElementById('rt-fallback').value;
+      const cooldown_secs = Number(document.getElementById('rt-cooldown').value) || 60;
+      const provider_priority = document.getElementById('rt-priority').value.split(',').map(s => s.trim()).filter(Boolean);
+      const r = await api('/gateway/admin/settings', { method: 'POST', body: JSON.stringify({ routing_strategy, fallback_order, cooldown_secs, provider_priority }) });
+      document.getElementById('rt-msg').textContent = r.ok ? 'Settings saved.' : (r.data?.detail || JSON.stringify(r.data));
+    }
+    async function saveCombo() {
+      const name = document.getElementById('cb-name').value.trim();
+      const targets = document.getElementById('cb-targets').value.split(',').map(s => s.trim()).filter(Boolean);
+      const r = await api('/gateway/admin/combos', { method: 'POST', body: JSON.stringify({ name, targets }) });
+      if (r.ok) { document.getElementById('cb-name').value = ''; document.getElementById('cb-targets').value = ''; loadRouting(); }
+    }
+    async function deleteCombo(name) { await api(`/gateway/admin/combos/${name}`, { method: 'DELETE' }); loadRouting(); }
 
     async function loadSkills() {
       const r = await api('/gateway/admin/skills');
@@ -459,14 +633,20 @@
     function renderActivity() {
       const el = document.getElementById('activity-body');
       if (!el) return;
-      el.innerHTML = activityEvents.slice(0, 30).map(ev => `
+      el.innerHTML = activityEvents.slice(0, 30).map(ev => {
+        const m = ev.meta || {};
+        const diff = (m.added !== undefined && m.removed !== undefined) ? ` <span style="color:#fff">+${m.added} -${m.removed}</span>` : '';
+        const lines = m.lines ? ` <span style="color:var(--dim)">#${m.lines}</span>` : '';
+        const dur = m.duration_ms !== undefined ? ` <span style="color:var(--dim)">(${m.duration_ms}ms)</span>` : '';
+        return `
         <tr>
           <td class="mono">${new Date(ev.ts * 1000).toLocaleTimeString()}</td>
           <td><span class="pill ${ev.phase === 'completed' || ev.phase === 'generating' || ev.phase === 'calling_tool' ? 'on' : ''}">${ev.phase}</span></td>
           <td class="mono">${ev.agent || ev.id}</td>
           <td class="mono">${ev.target || '-'}</td>
-          <td>${ev.message}</td>
-        </tr>`).join('') || '<tr><td colspan="5" style="color:var(--dim)">Waiting for activity...</td></tr>';
+          <td class="mono">${ev.message}${lines}${diff}${dur}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="5" style="color:var(--dim)">Waiting for activity...</td></tr>';
     }
     function connectActivityStream() {
       if (activitySource) return;
@@ -478,6 +658,8 @@
           activityEvents.unshift(ev);
           if (activityEvents.length > 50) activityEvents.pop();
           renderActivity();
+          const pgSt = document.getElementById('pg-status');
+          if (pgSt) { pgSt.textContent = ev.message; pgSt.className = 'pill ' + (ev.phase === 'completed' ? '' : 'on'); }
           if (ev.id && ev.id.startsWith('sub_')) loadSubagents();
         } catch {}
       }));
@@ -508,6 +690,74 @@
       if (r.ok) { document.getElementById('sub-prompt').value = ''; loadSubagents(); }
     }
     async function deleteSubagent(id) { await api(`/gateway/admin/subagents/${id}`, { method: 'DELETE' }); loadSubagents(); }
+
+    function toggleMcpTransport() {
+      const v = document.getElementById('mcp-transport').value;
+      document.getElementById('mcp-url').style.display = v === 'http' ? 'block' : 'none';
+      document.getElementById('mcp-cmd').style.display = v === 'stdio' ? 'block' : 'none';
+      document.getElementById('mcp-args').style.display = v === 'stdio' ? 'block' : 'none';
+    }
+    function fillMcpPreset(kind) {
+      if (kind === 'fs') {
+        document.getElementById('mcp-name').value = 'filesystem';
+        document.getElementById('mcp-transport').value = 'stdio';
+        document.getElementById('mcp-cmd').value = 'npx';
+        document.getElementById('mcp-args').value = '-y @modelcontextprotocol/server-filesystem ~/Desktop';
+        document.getElementById('mcp-kv').value = '';
+      } else if (kind === 'notion') {
+        document.getElementById('mcp-name').value = 'notion';
+        document.getElementById('mcp-transport').value = 'http';
+        document.getElementById('mcp-url').value = 'https://mcp.notion.com/mcp';
+        document.getElementById('mcp-kv').value = '{"Authorization":"Bearer ntn_..."}';
+      } else if (kind === 'github') {
+        document.getElementById('mcp-name').value = 'github';
+        document.getElementById('mcp-transport').value = 'stdio';
+        document.getElementById('mcp-cmd').value = 'npx';
+        document.getElementById('mcp-args').value = '-y @modelcontextprotocol/server-github';
+        document.getElementById('mcp-kv').value = '{"GITHUB_PERSONAL_ACCESS_TOKEN":"ghp_..."}';
+      }
+      toggleMcpTransport();
+    }
+    async function loadMcp() {
+      const r = await api('/gateway/admin/mcp');
+      document.getElementById('mcp-body').innerHTML = (r.data.mcp_servers || []).map(m => `
+        <tr>
+          <td class="mono">${m.name}</td>
+          <td class="mono">${m.transport}</td>
+          <td class="mono">${m.transport === 'http' ? (m.url || '-') : [m.command, ...(m.args || [])].join(' ')}</td>
+          <td><span class="pill ${m.enabled ? 'on' : ''}">${m.enabled ? 'enabled' : 'disabled'}</span></td>
+          <td class="row">
+            <button class="btn-ghost" onclick="testMcp('${m.name}')">List Tools</button>
+            <button class="btn-ghost" onclick="toggleMcp('${m.name}')">Toggle</button>
+            <button class="btn-ghost" onclick="deleteMcp('${m.name}')">Delete</button>
+          </td>
+        </tr>`).join('') || '<tr><td colspan="5" style="color:var(--dim)">No external MCP servers connected.</td></tr>';
+    }
+    async function saveMcp() {
+      const name = document.getElementById('mcp-name').value.trim();
+      const transport = document.getElementById('mcp-transport').value;
+      const command = document.getElementById('mcp-cmd').value.trim() || null;
+      const args = document.getElementById('mcp-args').value.trim().split(/\s+/).filter(Boolean);
+      const url = document.getElementById('mcp-url').value.trim() || null;
+      const kvRaw = document.getElementById('mcp-kv').value.trim();
+      let kv = {};
+      if (kvRaw) {
+        try { kv = JSON.parse(kvRaw); } catch { document.getElementById('mcp-msg').textContent = 'Invalid JSON in Env / Headers'; return; }
+      }
+      const payload = transport === 'http' ? { name, transport, url, headers: kv } : { name, transport, command, args, env: kv };
+      const r = await api('/gateway/admin/mcp', { method: 'POST', body: JSON.stringify(payload) });
+      document.getElementById('mcp-msg').textContent = r.ok ? `Saved MCP '${name}'` : (r.data?.detail || JSON.stringify(r.data));
+      if (r.ok) { document.getElementById('mcp-name').value = ''; loadMcp(); }
+    }
+    async function toggleMcp(n) { await api(`/gateway/admin/mcp/${n}/toggle`, { method: 'PATCH' }); loadMcp(); }
+    async function deleteMcp(n) { await api(`/gateway/admin/mcp/${n}`, { method: 'DELETE' }); loadMcp(); }
+    async function testMcp(n) {
+      document.getElementById('mcp-msg').textContent = `Fetching tools from '${n}'...`;
+      const r = await api(`/gateway/admin/mcp/${n}/tools`, { method: 'POST', body: '{}' });
+      document.getElementById('mcp-msg').textContent = r.ok
+        ? `Tools (${(r.data.tools || []).length}): ${(r.data.tools || []).map(t => t.function.name).join(', ')}`
+        : (r.data?.detail || JSON.stringify(r.data));
+    }
 
     async function loadKeys() {
       const r = await api('/gateway/admin/keys');
@@ -552,6 +802,7 @@
       const skills = document.getElementById('pg-skills').value.trim();
       const sessionId = document.getElementById('pg-session').value.trim();
       const redact = document.getElementById('pg-redact').checked;
+      const useMcp = document.getElementById('pg-mcp').checked;
       const content = document.getElementById('pg-prompt').value;
       const out = document.getElementById('pg-out');
       out.textContent = 'Running...';
@@ -559,6 +810,7 @@
       if (skills) headers['x-eay-skills'] = skills;
       if (sessionId) headers['x-eay-session-id'] = sessionId;
       if (redact) headers['x-eay-redact'] = 'true';
+      if (useMcp) headers['x-eay-mcp'] = '*';
       const r = await api('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model, messages: [{ role: 'user', content }], stream: false }) });
       out.textContent = r.ok ? (r.data.choices?.[0]?.message?.content || JSON.stringify(r.data, null, 2)) : JSON.stringify(r.data, null, 2);
     }

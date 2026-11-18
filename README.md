@@ -21,7 +21,8 @@ The gateway sends each request to one of your connected accounts and automatical
   - **Agent Profiles** (`agent/<name>`) combining model/combo, skills, personality, and tuning
   - **Session Memory** via `x-eay-session-id`
 - **Guardrails & Budgets:** Virtual keys (`gw-sk-…`) with per-key `allowed_providers`, `rate_limit_per_min`, `max_tokens_budget`, `max_cost_usd`, plus optional secret redaction (`x-eay-redact: true`) and context trimming (`x-eay-max-context-chars`)
-- **Embedded Web Console & Live Activity:** Open `http://127.0.0.1:20129/` (or `/ui`) to manage providers, keys, skills, agents, playground, and watch **real-time subagent & request phases** (`preparing`, `routing`, `thinking`, `calling_tool`, `generating`, `failover`, `completed`) over SSE
+- **External MCP Connectors (`x-eay-mcp`):** Connect local `stdio` MCP servers (Filesystem, GitHub, Postgres) and Streamable HTTP remote MCP servers (Notion, Linear, Figma) with custom auth headers and automatic tool execution loops
+- **Embedded Web Console & Live Activity:** Open `http://127.0.0.1:20129/` (or `/ui`) to log in via OAuth, inspect live quotas, configure routing & combos, manage skills/agents/MCP/keys, test in Playground, and watch **real-time subagent & request phases** (`preparing`, `routing`, `thinking`, `calling_tool` with file/line/diff metadata, `generating`, `failover`, `completed`) over SSE
 
 ## Quick start
 

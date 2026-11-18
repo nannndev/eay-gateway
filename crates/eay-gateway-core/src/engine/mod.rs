@@ -4,7 +4,7 @@ mod routing;
 mod state;
 mod stream;
 
-pub use activity::{ActivityEvent, ActivityHub, SubagentRun};
+pub use activity::{build_tool_activity_meta, ActivityEvent, ActivityHub, ActivityMeta, SubagentRun};
 pub use state::{build_gateway_providers, get_oauth_accounts_state};
 pub use stream::ChatStream;
 
@@ -14,6 +14,7 @@ pub struct ChatOptions {
     pub session_id: Option<String>,
     pub max_context_chars: usize,
     pub redact_secrets: bool,
+    pub mcp_servers: Vec<String>,
     pub run_id: Option<String>,
     pub agent_label: Option<String>,
 }
@@ -449,8 +450,137 @@ impl GatewayEngine {
         );
 
         let req_model = base_model;
+        let caller_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+
+        let mcp_records = self.resolve_mcp_servers(&opts.mcp_servers);
+        if !mcp_records.is_empty() {
+            let mut merged_tools = body.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+            for srv in &mcp_records {
+                if let Ok(srv_tools) = crate::mcp::list_tools_openai(&self.http_client, srv).await {
+                    merged_tools.extend(srv_tools);
+                }
+            }
+            if !merged_tools.is_empty() {
+                body["tools"] = Value::Array(merged_tools);
+                body["stream"] = json!(false);
+                const MAX_MCP_ROUNDS: usize = 8;
+                for _ in 0..MAX_MCP_ROUNDS {
+                    let ChatReply::Json(reply) = self
+                        .execute_chat_turn(
+                            key.as_ref(),
+                            &body,
+                            &req_model,
+                            &run_id,
+                            parent_id.as_deref(),
+                            agent_label.as_deref(),
+                            media_req,
+                        )
+                        .await?
+                    else {
+                        unreachable!("stream forced false during MCP loop");
+                    };
+                    let msg = &reply["choices"][0]["message"];
+                    let mcp_calls: Vec<Value> = msg["tool_calls"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|tc| tc["function"]["name"].as_str().is_some_and(|n| crate::mcp::parse_tool_name(n).is_some()))
+                        .cloned()
+                        .collect();
+                    if mcp_calls.is_empty() {
+                        if let Some(ref sid) = opts.session_id {
+                            self.append_session_turn(sid, &incoming_turns, &reply);
+                        }
+                        return Ok(if caller_stream { json_reply_to_sse(&reply) } else { ChatReply::Json(reply) });
+                    }
+                    if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                        msgs.push(msg.clone());
+                        for tc in mcp_calls {
+                            let call_id = tc["id"].as_str().unwrap_or("");
+                            let full_name = tc["function"]["name"].as_str().unwrap_or("");
+                            let args: Value =
+                                serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
+                            let output = if let Some((srv_name, tool_name)) = crate::mcp::parse_tool_name(full_name) {
+                                let (mut meta, msg_label) = build_tool_activity_meta(full_name, &args);
+                                let t_tool = std::time::Instant::now();
+                                let res = match mcp_records.iter().find(|s| s.name == srv_name) {
+                                    Some(srv) => crate::mcp::call_tool(&self.http_client, srv, tool_name, args)
+                                        .await
+                                        .unwrap_or_else(|e| format!("MCP error: {e}")),
+                                    None => format!("MCP server '{srv_name}' not active"),
+                                };
+                                meta.duration_ms = Some(t_tool.elapsed().as_millis() as i64);
+                                self.activity.emit_with_meta(
+                                    &run_id,
+                                    parent_id.as_deref(),
+                                    agent_label.as_deref(),
+                                    "calling_tool",
+                                    msg_label,
+                                    None,
+                                    Some(full_name),
+                                    Some(meta),
+                                );
+                                res
+                            } else {
+                                "Unknown MCP tool".into()
+                            };
+                            msgs.push(json!({ "role": "tool", "tool_call_id": call_id, "content": output }));
+                        }
+                    }
+                }
+            }
+        }
+
+        let reply = self
+            .execute_chat_turn(
+                key.as_ref(),
+                &body,
+                &req_model,
+                &run_id,
+                parent_id.as_deref(),
+                agent_label.as_deref(),
+                media_req,
+            )
+            .await?;
+        if let (Some(ref sid), ChatReply::Json(ref reply_json)) = (&opts.session_id, &reply) {
+            self.append_session_turn(sid, &incoming_turns, reply_json);
+        }
+        Ok(reply)
+    }
+
+    fn resolve_mcp_servers(&self, requested: &[String]) -> Vec<crate::store::McpServerRecord> {
+        if requested.is_empty() {
+            return Vec::new();
+        }
+        let all: Vec<_> = self.store.list_mcp_servers().into_iter().filter(|s| s.enabled).collect();
+        if requested.iter().any(|r| r == "*") {
+            return all;
+        }
+        all.into_iter().filter(|s| requested.iter().any(|r| r == &s.name)).collect()
+    }
+
+    fn append_session_turn(&self, sid: &str, incoming_turns: &[Value], reply_json: &Value) {
+        let mut hist = self.store.get_session_messages(sid);
+        hist.extend(incoming_turns.iter().cloned());
+        if let Some(assistant_msg) = reply_json.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message")) {
+            hist.push(assistant_msg.clone());
+        }
+        let _ = self.store.save_session_messages(sid, &hist);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_chat_turn(
+        &self,
+        key: Option<&VirtualKeyRecord>,
+        body: &Value,
+        req_model: &str,
+        run_id: &str,
+        parent_id: Option<&str>,
+        agent_label: Option<&str>,
+        media_req: crate::translate::MediaRequirements,
+    ) -> Result<ChatReply, ChatError> {
         let wants_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
-        let (mut targets, settings, key_name) = self.check_key_and_resolve(key.as_ref(), &req_model)?;
+        let (mut targets, settings, key_name) = self.check_key_and_resolve(key, req_model)?;
         if media_req.any() && targets.len() > 1 {
             filter_multimodal_targets(&mut targets, media_req);
         }
@@ -462,9 +592,9 @@ impl GatewayEngine {
             }
             let target_pub = target.public();
             self.activity.emit_phase(
-                &run_id,
-                parent_id.as_deref(),
-                agent_label.as_deref(),
+                run_id,
+                parent_id,
+                agent_label,
                 "routing",
                 format!("Routing to {target_pub}..."),
                 Some(&target_pub),
@@ -484,7 +614,7 @@ impl GatewayEngine {
                         }
                     };
                     let Some((req, kind)) =
-                        crate::oauth::subscription_request(&self.http_client, &target.provider, &cred, &target.model, &body)
+                        crate::oauth::subscription_request(&self.http_client, &target.provider, &cred, &target.model, body)
                     else {
                         break;
                     };
@@ -508,7 +638,7 @@ impl GatewayEngine {
                 let Some((api_key, base)) = self.resolve_apikey_and_base(&target, acc.as_ref(), p) else {
                     continue;
                 };
-                let (req, kind) = self.build_apikey_chat_request(p, &base, api_key, &target, &body);
+                let (req, kind) = self.build_apikey_chat_request(p, &base, api_key, &target, body);
                 match req.header("Accept", "text/event-stream").send().await {
                     Ok(r) => resp = Some((r, kind)),
                     Err(e) => last_error = format!("{}: {e}", target.public()),
@@ -520,9 +650,9 @@ impl GatewayEngine {
                     let _ = self.store.record_account_error(&a.id, Some(&last_error));
                 }
                 self.activity.emit_phase(
-                    &run_id,
-                    parent_id.as_deref(),
-                    agent_label.as_deref(),
+                    run_id,
+                    parent_id,
+                    agent_label,
                     "failover",
                     format!("Failover from {}: {last_error}", target.public()),
                     Some(&target_pub),
@@ -537,7 +667,7 @@ impl GatewayEngine {
                         &target,
                         acc.as_ref(),
                         &cool,
-                        key.as_ref(),
+                        key,
                         &key_name,
                         t0,
                         wants_stream,
@@ -546,9 +676,9 @@ impl GatewayEngine {
                     .await;
                 eprintln!("[GATEWAY CHAT] {last_error}");
                 self.activity.emit_phase(
-                    &run_id,
-                    parent_id.as_deref(),
-                    agent_label.as_deref(),
+                    run_id,
+                    parent_id,
+                    agent_label,
                     "failover",
                     format!("Failover: {last_error}"),
                     Some(&target_pub),
@@ -563,9 +693,9 @@ impl GatewayEngine {
             }
 
             self.activity.emit_phase(
-                &run_id,
-                parent_id.as_deref(),
-                agent_label.as_deref(),
+                run_id,
+                parent_id,
+                agent_label,
                 "waiting_upstream",
                 format!("Streaming from {target_pub}..."),
                 Some(&target_pub),
@@ -576,11 +706,11 @@ impl GatewayEngine {
                 store: self.store.clone(),
                 tr: tr.clone(),
                 activity: self.activity.clone(),
-                run_id: run_id.clone(),
-                parent_id: parent_id.clone(),
-                agent: agent_label.clone(),
+                run_id: run_id.to_string(),
+                parent_id: parent_id.map(String::from),
+                agent: agent_label.map(String::from),
                 target: target_pub.clone(),
-                key_id: key.as_ref().map(|k| k.id.clone()),
+                key_id: key.map(|k| k.id.clone()),
                 key_name: key_name.clone(),
                 provider: target.provider.clone(),
                 model: target.model.clone(),
@@ -606,21 +736,13 @@ impl GatewayEngine {
                 return Err(gateway_err(502, msg));
             }
             let reply_json = aggregate_sse(&sse, usage);
-            if let Some(ref sid) = opts.session_id {
-                let mut hist = self.store.get_session_messages(sid);
-                hist.extend(incoming_turns);
-                if let Some(assistant_msg) = reply_json.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message")) {
-                    hist.push(assistant_msg.clone());
-                }
-                let _ = self.store.save_session_messages(sid, &hist);
-            }
             return Ok(ChatReply::Json(reply_json));
         }
 
         self.activity.emit_phase(
-            &run_id,
-            parent_id.as_deref(),
-            agent_label.as_deref(),
+            run_id,
+            parent_id,
+            agent_label,
             "failed",
             format!("Failed: {last_error}"),
             None,
@@ -703,6 +825,30 @@ fn commandcode_thread_id(seed: &str) -> String {
     use sha2::{Digest, Sha256};
     let h = hex::encode(Sha256::digest(seed.as_bytes()));
     format!("{}-{}-4{}-a{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
+}
+
+fn json_reply_to_sse(reply: &Value) -> ChatReply {
+    let id = reply["id"].clone();
+    let created = reply["created"].clone();
+    let model = reply["model"].clone();
+    let msg = &reply["choices"][0]["message"];
+    let finish = reply["choices"][0]["finish_reason"].clone();
+    let mut delta = json!({ "role": "assistant" });
+    if let Some(c) = msg.get("content").filter(|v| !v.is_null()) {
+        delta["content"] = c.clone();
+    }
+    if let Some(tc) = msg.get("tool_calls").filter(|v| !v.is_null()) {
+        delta["tool_calls"] = tc.clone();
+    }
+    let chunk1 = format!(
+        "data: {}\n\n",
+        json!({ "id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{ "index": 0, "delta": delta, "finish_reason": null }] })
+    );
+    let chunk2 = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({ "id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{ "index": 0, "delta": {}, "finish_reason": finish }] })
+    );
+    ChatReply::Stream(futures::stream::iter(vec![Ok(Bytes::from(chunk1)), Ok(Bytes::from(chunk2))]).boxed())
 }
 
 fn gateway_err(status: u16, message: String) -> ChatError {
@@ -1022,6 +1168,27 @@ mod tests {
             hub.finish_run("sub_1", Some("LGTM".into()), None);
             assert_eq!(hub.get_run("sub_1").unwrap().phase, "completed");
             assert!(rx.try_recv().is_ok());
+        }
+
+        #[test]
+        fn builds_ide_style_metadata_for_file_operations() {
+            let (meta_read, msg_read) = build_tool_activity_meta(
+                "mcp__fs__read_file",
+                &json!({ "path": "crates/eay-gateway-core/Cargo.toml", "start_line": 1, "end_line": 29 }),
+            );
+            assert_eq!(meta_read.action.as_deref(), Some("Analyzed"));
+            assert_eq!(meta_read.file.as_deref(), Some("Cargo.toml"));
+            assert_eq!(meta_read.lines.as_deref(), Some("L1-29"));
+            assert_eq!(msg_read, "Analyzed Cargo.toml #L1-29");
+
+            let (meta_edit, msg_edit) = build_tool_activity_meta(
+                "mcp__fs__edit_file",
+                &json!({ "path": "src/models.rs", "old_string": "a", "new_string": "a\nb\nc" }),
+            );
+            assert_eq!(meta_edit.action.as_deref(), Some("Edited"));
+            assert_eq!(meta_edit.added, Some(3));
+            assert_eq!(meta_edit.removed, Some(1));
+            assert_eq!(msg_edit, "Edited models.rs +3 -1");
         }
     }
 }
