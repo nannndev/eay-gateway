@@ -1,0 +1,85 @@
+# Getting started
+
+## Install
+
+**Prebuilt binary:** download `eay-gateway-<platform>` from the
+[releases page](https://github.com/nannndev/eay-gateway/releases) and check it against `SHA256SUMS.txt`.
+
+| Platform | File |
+|---|---|
+| macOS (Apple Silicon + Intel) | `eay-gateway-universal-apple-darwin` |
+| Windows x64 | `eay-gateway-x86_64-pc-windows-msvc.exe` |
+| Linux x64 | `eay-gateway-x86_64-unknown-linux-gnu` |
+
+**From source** (Rust 1.89 or newer):
+
+```sh
+git clone https://github.com/nannndev/eay-gateway && cd eay-gateway
+cargo build --release --bin eay-gateway
+./target/release/eay-gateway
+```
+
+It prints `eay-gateway v0.1.0 listening on http://127.0.0.1:20129 (data: ~/.eay-gateway)`.
+Check it with `curl http://127.0.0.1:20129/health`.
+
+## Connect an API key
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/providers/openai/connect \
+  -H 'content-type: application/json' -d '{"api_key":"sk-..."}'
+```
+
+The gateway checks the key against the provider first and fetches its model list. Some providers
+need a base URL, for example Azure OpenAI or Cloudflare:
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/providers/azure-openai/connect \
+  -H 'content-type: application/json' \
+  -d '{"api_key":"...","base_url":"https://<resource>.openai.azure.com/openai/v1"}'
+```
+
+Add more keys for the same provider with `POST /gateway/admin/providers/<id>/keys`. They rotate
+together (see [Routing](routing.md)).
+
+## Log in with a subscription
+
+Subscription providers use the provider's own login:
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/accounts/claude/start -H 'content-type: application/json' -d '{}'
+```
+
+- **Browser login** (`"kind":"redirect"`): open `auth_url`. The gateway listens on a local
+  callback port and finishes the login by itself.
+- **Device login** (`"kind":"device"`): open `verification_uri` and enter `user_code`, then poll
+  `POST /gateway/admin/accounts/<provider>/poll` with `{"session_id": "..."}` until it returns
+  `{"status":"done"}`.
+
+Some logins can be imported from a tool already signed in on this machine: the Codex CLI,
+the Kiro IDE, the Command Code CLI and MiMo Desktop. See [Providers](providers.md).
+
+## Use it from your tools
+
+Any OpenAI-compatible client works. Use base URL `http://127.0.0.1:20129/v1` and any API key,
+unless you set up [virtual keys](api.md#virtual-keys).
+
+```sh
+# OpenAI SDKs and most CLIs
+export OPENAI_BASE_URL=http://127.0.0.1:20129/v1
+export OPENAI_API_KEY=anything
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:20129/v1", api_key="anything")
+print(client.chat.completions.create(model="auto", messages=[{"role": "user", "content": "Hi"}]).choices[0].message.content)
+```
+
+Pick a model with the [model id](routing.md#model-ids): `auto`, `cc/auto`,
+`cc/claude-sonnet-5-5`, `auto/<combo>`. `GET /v1/models` lists what your connected providers
+offer right now.
+
+## Next
+
+- [Routing](routing.md): control which account handles a request
+- [Configuration](configuration.md): run it for several apps at once

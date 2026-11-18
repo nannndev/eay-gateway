@@ -1,94 +1,66 @@
 # eay-gateway
 
 One local, OpenAI-compatible endpoint for all your AI subscriptions and API keys.
-Point Claude Code, Codex, Cursor, OpenNotchi or any OpenAI client at `http://127.0.0.1:20129/v1`
-and the gateway routes each request to a connected account, falling back when one is rate-limited.
+
+Point Claude Code, Codex, Cursor, OpenNotchi or any OpenAI client at `http://127.0.0.1:20129/v1`.
+The gateway sends each request to one of your connected accounts and moves on to the next one
+when an account is rate-limited, out of quota or down.
+
+- **14 subscription logins** (Claude, ChatGPT/Codex, GitHub Copilot, Gemini CLI, Kimi, Cline, Kiro, …)
+  and **52 API-key providers** (OpenAI, Anthropic, DeepSeek, OpenRouter, Groq, NVIDIA, …)
+- **Routing:** `auto` across everything, one provider (`cx/auto`), or your own mix (`auto/coding`),
+  with priority, round-robin or fill-first, and cooldown after rate limits
+- **Several accounts and keys per provider**, rotated and paused independently
+- **Live quotas** per account (remaining %, reset time, plan), usage history and estimated cost
+- **Model lists synced** from each provider
+- Translates between OpenAI, Anthropic, Codex Responses, Gemini, Command Code and Kiro formats,
+  streaming or not
 
 ## Quick start
 
 ```sh
-cargo run --release --bin eay-gateway          # listens on 127.0.0.1:20129
-curl http://127.0.0.1:20129/v1/models
+git clone https://github.com/nannndev/eay-gateway && cd eay-gateway
+cargo run --release --bin eay-gateway       # http://127.0.0.1:20129
 ```
 
-| Flag | Env | Default |
-|---|---|---|
-| `--host` | `EAY_GATEWAY_HOST` | `127.0.0.1` |
-| `--port` | `EAY_GATEWAY_PORT` | `20129` |
-| `--data-dir` | `EAY_GATEWAY_DATA_DIR` | `~/.eay-gateway` (`%APPDATA%\eay-gateway` on Windows) |
-| `--idle-exit <min>` | | off: run until stopped |
-
-### Sharing one gateway between apps
-
-Several apps on one machine should share a single gateway, not each run their own:
-
-1. Probe `GET /health`. If it answers `{"service":"eay-gateway"}` with a new enough `version`, use it.
-2. Otherwise start the binary with `--idle-exit 30`. Don't kill it when your app quits; another app
-   may be using it, and it exits by itself after 30 minutes without requests.
-3. Only one gateway can use a data folder at a time (`gateway.lock`); a second one exits with
-   status 3 instead of fighting over the same OAuth tokens.
-
-The older `NOTCHI_GATEWAY_*` variables still work. On first run the gateway moves an existing
-`~/.notchi-gateway` folder to the new location, so connected accounts and keys carry over.
-
-## Architecture
-
-```
-crates/
-├── eay-gateway-core/   library: everything that isn't HTTP
-│   ├── providers.rs    catalog of API-key providers and subscription (OAuth) providers
-│   ├── store.rs        SQLite: accounts, keys (AES-GCM encrypted), usage log, settings, combos
-│   ├── engine.rs       routing: auto / <alias>/auto / auto/<combo>, strategies, fallback, cooldown
-│   ├── translate.rs    OpenAI <-> Anthropic, Codex Responses, Gemini, Command Code, SSE streams
-│   ├── kiro.rs         Kiro request format and AWS event-stream decoder
-│   ├── oauth/          browser and device-code logins, token refresh, per-provider requests
-│   ├── quota.rs        live usage windows (remaining %, reset time, plan) per account
-│   ├── models.rs       key checks and model lists synced from each provider
-│   └── pricing.rs      estimated API-equivalent cost per request
-└── eay-gateway/        HTTP server (axum) + the `eay-gateway` binary
-    ├── routes/         /v1/* (OpenAI-compatible) and /gateway/admin/* (management API)
-    └── main.rs         CLI flags, data folder, hourly model refresh, graceful shutdown
-```
-
-- **Rust apps** can depend on `eay-gateway-core` and call `GatewayEngine::chat_completions`
-  in-process; it returns a `ChatReply` (SSE stream or JSON) or a `ChatError` with an HTTP status.
-- **Everything else** (Swift, Node, Python, …) runs the `eay-gateway` binary and talks HTTP.
-  This is how OpenNotchi uses it on macOS and Windows.
-
-### HTTP API
-
-| Area | Endpoints |
-|---|---|
-| OpenAI-compatible | `POST /v1/chat/completions`, `GET /v1/models` |
-| Health | `GET /health` → `{service, status, version}` |
-| Providers (API keys) | `GET /gateway/admin/providers`, `POST …/:id/connect`, `…/:id/keys`, `…/:id/models/sync`, `…/:id/import` |
-| Accounts (OAuth) | `GET /gateway/admin/accounts`, `POST …/:provider/start`, `…/poll`, `…/complete`, `…/reorder`, `…/test`, `GET …/usage` |
-| Routing | `GET/POST /gateway/admin/settings`, `GET/POST /gateway/admin/combos` |
-| Insight | `GET /gateway/admin/stats`, `GET /gateway/admin/analytics` |
-| Virtual keys | `GET/POST /gateway/admin/keys` (clients present `gw-sk-…` keys) |
-
-The admin API has no authentication, so keep the gateway bound to `127.0.0.1`.
-
-### Model ids
-
-- `auto`: every connected provider, in your priority order
-- `<alias>/auto`: one provider, e.g. `cx/auto`
-- `auto/<combo>`: your own ordered mix, e.g. `auto/coding`
-- `<alias>/<model>`: one model, e.g. `cc/claude-sonnet-5-5`
-
-## Development
+Connect a provider, then ask something:
 
 ```sh
-cargo fmt --all
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+curl -X POST http://127.0.0.1:20129/gateway/admin/providers/deepseek/connect \
+  -H 'content-type: application/json' -d '{"api_key":"sk-..."}'
+
+curl http://127.0.0.1:20129/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Releases: push a `vX.Y.Z` tag. CI builds `eay-gateway` for macOS (arm64, x86_64, universal),
-Windows x64 and Linux x64, and attaches the binaries plus `SHA256SUMS.txt` to the GitHub release.
+Prebuilt binaries for macOS, Windows and Linux are on the
+[releases page](https://github.com/nannndev/eay-gateway/releases).
+
+## Documentation
+
+| | |
+|---|---|
+| [Getting started](docs/getting-started.md) | Install, run, connect accounts and keys, use it from your tools |
+| [Configuration](docs/configuration.md) | Flags, environment variables, data folder, sharing one gateway between apps |
+| [Routing](docs/routing.md) | Model ids, auto modes, combos, strategies, fallback and cooldown |
+| [Providers](docs/providers.md) | Every provider, its alias, how to log in, quotas and model sync |
+| [HTTP API](docs/api.md) | `/v1` OpenAI-compatible API and the `/gateway/admin` management API |
+| [Architecture](docs/architecture.md) | Crates and modules, request flow, storage, embedding the core in Rust |
+| [Development](docs/development.md) | Building, testing, releasing, adding a provider |
+
+## Security
+
+The management API has no authentication, so keep the gateway bound to `127.0.0.1` (the default).
+API keys and OAuth tokens are encrypted on disk with AES-256-GCM, using a key file in the data folder.
+Clients of `/v1` may present gateway-issued virtual keys (`gw-sk-…`) with per-key provider limits
+and rate limits.
 
 ## Experimental providers
 
-Antigravity, Grok CLI, Kiro and MiniMax Code identify as their official clients to reach
-private endpoints. They can stop working when those clients change, and using them may break
-the provider's terms or get an account flagged. Use them with that in mind.
+Antigravity, Grok CLI, Kiro and MiniMax Code identify as their official clients to reach private
+endpoints. They can stop working whenever those clients change, and using them may break the
+provider's terms of service or get an account flagged.
+
+## License
+
+MIT
