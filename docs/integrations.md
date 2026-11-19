@@ -152,6 +152,24 @@ client = OpenAI(
 )
 ```
 
+## Shipping the gateway with your app
+
+Your users never install eay-gateway themselves; your app brings it.
+
+| Your app | How it gets the gateway |
+|---|---|
+| Desktop or CLI app | Bundle the binary for each OS you ship (below) |
+| Self-hosted web app (users install it on their own server) | Add the `ghcr.io/nannndev/eay-gateway` service to your `docker-compose.yml`, or have your installer download the static Linux binary |
+| Hosted web app, mobile app, browser extension | Run one gateway on your server; your app calls your server |
+
+Pin a version (for example `v0.3.1`) and check downloads against the release's `SHA256SUMS.txt`.
+Each machine runs one gateway per data folder, so two of your apps on the same machine share it,
+and the user signs in once. Give each app its own [virtual key](api.md#virtual-keys) to keep their
+budgets and usage apart.
+
+On a hosted server that serves other people, connect API keys, not personal subscription
+accounts.
+
 ## Desktop apps
 
 Ship the gateway binary with your app and talk to it over HTTP from native code. Several apps can

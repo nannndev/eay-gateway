@@ -13,7 +13,13 @@ base64 = "0.22"
 sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# rustls instead of the system OpenSSL, so Linux builds are static and run on any distro.
+# Native roots honour certificates the user installed (corporate proxies); webpki roots are the
+# fallback when the system has none (minimal containers).
+reqwest = { version = "0.12", default-features = false, features = [
+  "json", "stream", "charset", "http2", "system-proxy",
+  "rustls-tls-native-roots", "rustls-tls-webpki-roots",
+] }
 tokio.workspace = true
 rand = "0.8"
 chrono = "0.4"

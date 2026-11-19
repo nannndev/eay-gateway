@@ -2,6 +2,11 @@
 
 All notable changes to **eay-gateway** are listed below.
 
+## v0.3.1 — 2026-11-19
+
+- **Linux binaries run everywhere:** static builds (no glibc or OpenSSL needed) for x64 and the new
+  ARM64, so they work on Ubuntu 20.04+, Debian, Alpine and Raspberry Pi.
+
 ## v0.3.0 — 2026-11-19
 
 ### Highlights
