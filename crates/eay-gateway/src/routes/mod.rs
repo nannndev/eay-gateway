@@ -14,7 +14,8 @@ use eay_gateway_core::engine::GatewayEngine;
 use serde_json::json;
 
 async fn handle_ui() -> Html<&'static str> {
-    Html(include_str!("../ui.html"))
+    // The console lives in github.com/nannndev/eay-console (git submodule at crates/eay-gateway/console).
+    Html(include_str!("../../console/index.html"))
 }
 
 /// Without an admin token, only loopback Host headers may reach admin routes: blocks DNS rebinding

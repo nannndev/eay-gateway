@@ -1,0 +1,3 @@
+[submodule "crates/eay-gateway/console"]
+	path = crates/eay-gateway/console
+	url = https://github.com/nannndev/eay-console.git

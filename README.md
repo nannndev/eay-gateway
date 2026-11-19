@@ -27,7 +27,7 @@ The gateway sends each request to one of your connected accounts and automatical
 ## Quick start
 
 ```sh
-git clone https://github.com/nannndev/eay-gateway && cd eay-gateway
+git clone --recurse-submodules https://github.com/nannndev/eay-gateway && cd eay-gateway
 cargo run --release --bin eay-gateway       # http://127.0.0.1:20129 (Web Console at /ui)
 ```
 
