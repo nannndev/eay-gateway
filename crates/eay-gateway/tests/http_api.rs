@@ -126,6 +126,54 @@ mod body_limit {
     }
 }
 
+mod legacy_admin_paths {
+    use super::*;
+    use eay_gateway::gateway_service;
+
+    /// The same service the binary serves: the router behind the legacy-path rewrite.
+    async fn send(method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = gateway_service(gateway_router(GatewayEngine::new(GatewayStore::new(dir.path()).unwrap())));
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        let st = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (st, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn old_admin_paths_reach_the_new_routes() {
+        let (st, body) = send("GET", "/gateway/admin/combos", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.get("combos").is_some(), "{body}");
+        let (st, body) = send("POST", "/gateway/admin/keys", Some(json!({ "name": "legacy" }))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body["key"]["key"].as_str().unwrap().starts_with("gw-sk-"));
+        // Query strings survive the rewrite.
+        assert_eq!(send("GET", "/gateway/admin/usage?limit=5", None).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_old_path_keeps_the_loopback_guard() {
+        // Same rule as the new path: without a token, admin answers only loopback Hosts.
+        let dir = tempfile::tempdir().unwrap();
+        let svc = gateway_service(gateway_router(GatewayEngine::new(GatewayStore::new(dir.path()).unwrap())));
+        let req = Request::builder().uri("/gateway/admin/combos").header("host", "evil.example").body(Body::empty()).unwrap();
+        assert_eq!(svc.oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn only_the_exact_admin_segment_is_rewritten() {
+        assert_eq!(send("GET", "/gateway/administrator/combos", None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(send("GET", "/gateway/v1/models", None).await.0, StatusCode::OK);
+    }
+}
+
 mod health {
     use super::*;
 

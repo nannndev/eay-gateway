@@ -2,7 +2,7 @@
 
 All notable changes to **eay-gateway** are listed below.
 
-## Unreleased
+## v0.4.0 — 2026-11-19
 
 - **Agent teams:** a lead agent hands work to your saved agents (reviewer, tester, …), several at
   once. The lead is the root of the run tree. Cancelling it stops the workers under it. A saved
@@ -16,6 +16,7 @@ All notable changes to **eay-gateway** are listed below.
 - Management routes dropped the `/admin` segment. `/gateway/admin/teams` is now
   `/gateway/teams`, and the same for accounts, providers, keys, agents, sessions, and the rest.
   `/v1`, `/gateway/v1`, and `/gateway/health` are unchanged. The admin token is unchanged.
+  The old `/gateway/admin/*` paths still work, so existing clients such as OpenNotchi keep running.
 
 ## v0.3.1 — 2026-11-19
 

@@ -207,6 +207,8 @@ does not include them.
 ## Skills, Agents, Sessions & Live Activity
 
 If `EAY_GATEWAY_ADMIN_TOKEN` (or `--admin-token`) is set, management routes (`/gateway/keys`, `/gateway/agents`, and the rest; not `/v1` or `/gateway/health`) require `Authorization: Bearer <token>` or `x-admin-token: <token>`.
+
+Before 0.4 these routes were under `/gateway/admin/*` (for example `/gateway/admin/keys`). Those paths still work and behave exactly like `/gateway/*`; use `/gateway/*` in new code.
 `EAY_GATEWAY_ADMIN_READ_TOKEN` (or `--admin-read-token`) adds a second token that can only make `GET` requests (stats, activity, lists), for dashboards and monitors; writes with it get `403`.
 Without a token, those management routes and the `x-eay-mcp` header only work when the `Host` header is `localhost`, `127.0.0.1` or `[::1]` (blocks DNS-rebinding from web pages); other hosts get `403`.
 

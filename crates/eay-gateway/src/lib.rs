@@ -6,4 +6,4 @@ pub mod routes;
 
 pub use eay_gateway_core as core;
 pub use error::GatewayError;
-pub use routes::gateway_router;
+pub use routes::{gateway_router, gateway_service};

@@ -283,6 +283,38 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
     public.merge(admin_routes).with_state(engine).layer(middleware::from_fn(cors_middleware))
 }
 
+/// The gateway as a service: the router, with legacy `/gateway/admin/*` paths rewritten first.
+/// Use this to serve it; `gateway_router` alone has no `/gateway/admin` paths.
+pub fn gateway_service(router: Router) -> LegacyAdminService {
+    tower::ServiceBuilder::new().map_request(rewrite_legacy_admin_uri as fn(Request) -> Request).service(router)
+}
+
+pub type LegacyAdminService = tower::util::MapRequest<Router, fn(Request) -> Request>;
+
+/// Management routes lived under `/gateway/admin/*` until 0.4. Clients built against that
+/// (OpenNotchi, eay-console before 0.4) keep working: `/gateway/admin/keys` is answered by
+/// `/gateway/keys` with the same auth and CORS. It runs before routing, because a router layer runs
+/// only after a route has matched.
+fn rewrite_legacy_admin_uri(mut req: Request) -> Request {
+    if let Some(new) = legacy_admin_path(req.uri()).and_then(|p| p.parse().ok()) {
+        *req.uri_mut() = new;
+    }
+    req
+}
+
+/// `/gateway/admin/keys?x=1` → `/gateway/keys?x=1`; None for any other path.
+fn legacy_admin_path(uri: &axum::http::Uri) -> Option<String> {
+    let rest = uri.path().strip_prefix("/gateway/admin")?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let path = if rest.is_empty() { "/gateway".to_string() } else { format!("/gateway{rest}") };
+    Some(match uri.query() {
+        Some(q) => format!("{path}?{q}"),
+        None => path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{admin_access, AdminAccess::*};

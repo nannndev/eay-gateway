@@ -2,7 +2,7 @@ mod service;
 
 use axum::{routing::get, Json};
 use eay_gateway::core::{GatewayEngine, GatewayStore};
-use eay_gateway::gateway_router;
+use eay_gateway::{gateway_router, gateway_service};
 use serde_json::{json, Value};
 use std::env;
 use std::net::SocketAddr;
@@ -242,7 +242,7 @@ async fn main() {
 
     eprintln!("eay-gateway v{} listening on http://{} (data: {})", env!("CARGO_PKG_VERSION"), addr, cfg.data_dir.display());
 
-    if let Err(e) = axum::serve(listener, app)
+    if let Err(e) = axum::serve(listener, tower::make::Shared::new(gateway_service(app)))
         .with_graceful_shutdown(async move {
             match cfg.idle_exit {
                 Some(limit) => tokio::select! { _ = shutdown_signal() => {}, _ = idle_timeout(last_request, limit) => {} },

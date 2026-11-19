@@ -2,7 +2,7 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-19
 
 ### Added
 - **Agent teams:** a model with a subagent budget can hand work to your saved agents
@@ -24,6 +24,8 @@ All notable changes to `eay-gateway` are documented in this file.
 - Management routes dropped the `/admin` segment. `/gateway/admin/teams` is now
   `/gateway/teams`, and the same for accounts, providers, keys, agents, sessions, and the rest.
   `/v1`, `/gateway/v1`, and `/gateway/health` are unchanged. The admin token is unchanged.
+  The old `/gateway/admin/*` paths still work (same auth and CORS), so existing clients such as
+  OpenNotchi keep running; new code should use `/gateway/*`.
 
 ## [0.3.1] - 2026-11-19
 
