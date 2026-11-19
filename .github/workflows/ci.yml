@@ -54,9 +54,10 @@ jobs:
           done
           # HTTPS from a minimal image with no CA bundle: the built-in roots must be enough. A wrong
           # key only comes back as "Authentication failed" if the TLS connection to DeepSeek worked.
-          docker run --rm --platform linux/$arch -v "$PWD/$f:/eay:ro" alpine:3.20 sh -c '
+          # curlimages/curl is Alpine with only curl, so no CA bundle the gateway could lean on.
+          docker run --rm --platform linux/$arch --user root -v "$PWD/$f:/eay:ro" --entrypoint sh curlimages/curl:8.11.1 -c '
+            rm -f /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem
             /eay --port 20199 --data-dir /tmp/d & sleep 2
-            wget -qO- --content-on-error --header "content-type: application/json" \
-              --post-data "{\"api_key\":\"sk-invalid\"}" \
-              http://127.0.0.1:20199/gateway/admin/providers/deepseek/connect' | tee /tmp/out.txt || true
+            curl -s -X POST -H "content-type: application/json" -d "{\"api_key\":\"sk-invalid\"}" \
+              http://127.0.0.1:20199/gateway/admin/providers/deepseek/connect' | tee /tmp/out.txt
           grep -q "Authentication failed" /tmp/out.txt
