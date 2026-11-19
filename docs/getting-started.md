@@ -135,5 +135,7 @@ offer right now.
 
 ## Next
 
+- [Integrations](integrations.md): set up Claude Code, Codex, Cursor, SDKs and apps
 - [Routing](routing.md): control which account handles a request
+- [HTTP API](api.md): agents, tool policies, subagents, approvals and sessions
 - [Configuration](configuration.md): run it for several apps at once
