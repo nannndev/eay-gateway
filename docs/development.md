@@ -2,16 +2,7 @@
 
 ## Build and check
 
-The web console is a separate repo, [eay-console](https://github.com/nannndev/eay-console),
-checked out as a git submodule at `crates/eay-gateway/console` and embedded at build time. Clone
-with `--recurse-submodules`, or in an existing checkout run:
-
-```sh
-git submodule update --init
-```
-
-To change the console, edit `crates/eay-gateway/console/index.html`, rebuild, then commit and push
-inside that folder and commit the new submodule commit here.
+The web console is a separate app: [eay-console](https://github.com/nannndev/eay-console).
 
 ```sh
 cargo build --workspace

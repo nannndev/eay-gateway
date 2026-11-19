@@ -21,8 +21,6 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true # web console (eay-console) is embedded at build time
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

@@ -14,7 +14,7 @@
 **From source** (Rust 1.89 or newer):
 
 ```sh
-git clone --recurse-submodules https://github.com/nannndev/eay-gateway && cd eay-gateway
+git clone https://github.com/nannndev/eay-gateway && cd eay-gateway
 cargo build --release --bin eay-gateway
 ./target/release/eay-gateway
 ```

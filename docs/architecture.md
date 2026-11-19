@@ -17,8 +17,7 @@ crates/
 │   ├── models.rs          key verification and model list sync
 │   └── pricing.rs         estimated cost per request
 └── eay-gateway/           HTTP server and the `eay-gateway` binary
-    ├── routes/            axum handlers: /v1, /gateway/admin, optional --admin-token middleware
-    ├── console/           git submodule: github.com/nannndev/eay-console, index.html embedded at / & /ui
+    ├── routes/            axum handlers: /v1, /gateway/admin, admin-token, CORS and per-key concurrency middleware
     ├── error.rs           GatewayError → HTTP status + JSON body
     └── main.rs            flags, data folder + migration, lock, idle exit, hourly model refresh
 ```

@@ -36,8 +36,8 @@ features:
     title: Budgets, Guardrails & Encryption
     details: AES-256-GCM encrypted credentials, virtual keys with token/USD budgets, optional secret redaction, context trimming, and --admin-token protection.
   - icon: ◫
-    title: Embedded Web Console & Subagents
-    details: Ships with a built-in Deep Dark Monochrome console (/ui), Agent/Skill presets (SKILL.md upload), session memory, and real-time subagent activity SSE.
+    title: Skills, Subagents & Live Activity
+    details: Agent/Skill presets (SKILL.md), session memory, subagents with cancel/join, and real-time activity over SSE. Manage it all from the separate eay-console web app.
 ---
 
 <div class="custom-section">
@@ -160,8 +160,8 @@ Client (Cursor, Claude, IDE)
 <div class="roadmap-grid">
   <div class="roadmap-card">
     <span class="tag tag-ready">Current Core</span>
-    <h3>Daemon &amp; Embedded Web Console</h3>
-    <p>Single Rust binary with AES-256 store, /v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings, multimodal routing, and built-in /ui console.</p>
+    <h3>Headless Daemon</h3>
+    <p>Single Rust binary with AES-256 store, /v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings, multimodal routing, and an admin API. The web console is a separate app (eay-console).</p>
   </div>
 
   <div class="roadmap-card">

@@ -392,19 +392,69 @@ mod virtual_key_budgets {
     }
 }
 
-mod web_ui {
+mod root_and_cors {
     use super::*;
 
-    #[tokio::test]
-    async fn serves_embedded_console_at_root_and_ui() {
-        let (app, _d) = app();
-        for path in ["/", "/ui"] {
-            let req = axum::http::Request::builder().method("GET").uri(path).body(axum::body::Body::empty()).unwrap();
-            let resp = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
-            assert!(ct.contains("text/html"), "{ct}");
+    async fn send(app: &Router, method: &str, uri: &str, headers: &[(&str, &str)]) -> axum::http::Response<axum::body::Body> {
+        let mut req = Request::builder().method(method).uri(uri);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
         }
+        app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn root_describes_the_api_instead_of_serving_html() {
+        let (app, _d) = app();
+        let (st, body) = call(&app, "GET", "/", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["service"], "eay-gateway");
+        assert_eq!(send(&app, "GET", "/ui", &[]).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_local_console_gets_cors_and_private_network_preflight() {
+        let (app, _d) = app();
+        let origin = "http://localhost:5173";
+        let pre = send(
+            &app,
+            "OPTIONS",
+            "/gateway/admin/combos",
+            &[
+                ("origin", origin),
+                ("access-control-request-method", "POST"),
+                ("access-control-request-headers", "content-type,x-admin-token"),
+                ("access-control-request-private-network", "true"),
+            ],
+        )
+        .await;
+        assert_eq!(pre.status(), StatusCode::NO_CONTENT);
+        let h = pre.headers();
+        assert_eq!(h["access-control-allow-origin"], origin);
+        assert_eq!(h["access-control-allow-headers"], "content-type,x-admin-token");
+        assert_eq!(h["access-control-allow-private-network"], "true");
+
+        let get = send(&app, "GET", "/gateway/admin/combos", &[("origin", origin)]).await;
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(get.headers()["access-control-allow-origin"], origin);
+    }
+
+    #[tokio::test]
+    async fn other_web_pages_are_refused_even_for_simple_requests() {
+        let (app, _d) = app();
+        for (method, uri) in [("OPTIONS", "/gateway/admin/mcp"), ("POST", "/v1/audio/transcriptions"), ("GET", "/gateway/admin/keys")] {
+            let resp = send(&app, method, uri, &[("origin", "https://evil.example")]).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+            assert!(resp.headers().get("access-control-allow-origin").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn clients_without_an_origin_are_unaffected() {
+        let (app, _d) = app();
+        let resp = send(&app, "GET", "/gateway/admin/combos", &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
     }
 }
 

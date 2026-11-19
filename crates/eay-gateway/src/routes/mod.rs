@@ -6,16 +6,83 @@ use axum::{
     extract::Request,
     http::{header, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use eay_gateway_core::engine::GatewayEngine;
 use serde_json::json;
 
-async fn handle_ui() -> Html<&'static str> {
-    // The console lives in github.com/nannndev/eay-console (git submodule at crates/eay-gateway/console).
-    Html(include_str!("../../console/index.html"))
+/// `/`: the gateway has no UI of its own; point people at the console and the API.
+async fn handle_root() -> Json<serde_json::Value> {
+    Json(json!({
+        "service": "eay-gateway",
+        "version": env!("CARGO_PKG_VERSION"),
+        "console": "https://github.com/nannndev/eay-console",
+        "openai_base_url": "/v1",
+        "health": "/gateway/health",
+    }))
+}
+
+/// Browser origins allowed to call this gateway (`--console-origin`, comma-separated), e.g. the
+/// hosted eay-console. Anything else gets no CORS headers, so other web pages still cannot read
+/// responses or send JSON to admin routes.
+fn allowed_origins() -> Vec<String> {
+    std::env::var("EAY_GATEWAY_CONSOLE_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|o| o.trim().trim_end_matches('/').to_string())
+        .filter(|o| !o.is_empty())
+        .collect()
+}
+
+/// Whether `origin` may call the gateway from a browser. `http://localhost:<port>` and
+/// `http://127.0.0.1:<port>` are always allowed so the console can be run locally.
+fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
+    let local = ["http://localhost:", "http://127.0.0.1:", "http://[::1]:"]
+        .iter()
+        .any(|p| origin.strip_prefix(p).is_some_and(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())));
+    local || allowed.iter().any(|a| a == origin)
+}
+
+/// CORS for the console. Requests without an `Origin` (CLIs, SDKs, desktop apps calling from
+/// native code) pass through untouched. A browser request from an origin that is not allowed is
+/// refused outright, not just left without CORS headers: "simple" cross-site requests (form posts,
+/// multipart audio uploads) would otherwise still run and spend the user's quota. Preflights from
+/// allowed origins are answered here, including Chrome's Private Network Access check, which a
+/// public page needs to call 127.0.0.1.
+async fn cors_middleware(req: Request, next: Next) -> Response {
+    let Some(origin) = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()).map(str::to_string) else {
+        return next.run(req).await;
+    };
+    if !origin_allowed(&origin, &allowed_origins()) {
+        let msg = format!("Origin {origin} is not allowed; start the gateway with --console-origin {origin}");
+        return (StatusCode::FORBIDDEN, Json(json!({ "detail": msg, "error": { "message": msg } }))).into_response();
+    }
+    if req.method() == axum::http::Method::OPTIONS {
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        let h = resp.headers_mut();
+        h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, axum::http::HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"));
+        if let Some(asked) = req.headers().get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
+            h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, asked.clone());
+        }
+        if req.headers().get("access-control-request-private-network").is_some() {
+            h.insert("access-control-allow-private-network", axum::http::HeaderValue::from_static("true"));
+        }
+        h.insert(header::ACCESS_CONTROL_MAX_AGE, axum::http::HeaderValue::from_static("600"));
+        add_cors_origin(h, &origin);
+        return resp;
+    }
+    let mut resp = next.run(req).await;
+    add_cors_origin(resp.headers_mut(), &origin);
+    resp
+}
+
+fn add_cors_origin(h: &mut axum::http::HeaderMap, origin: &str) {
+    if let Ok(v) = axum::http::HeaderValue::from_str(origin) {
+        h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+        h.insert(header::VARY, axum::http::HeaderValue::from_static("Origin"));
+    }
 }
 
 /// Without an admin token, only loopback Host headers may reach admin routes: blocks DNS rebinding
@@ -111,9 +178,7 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Builds the Axum router for OpenAI-compatible inference and gateway admin APIs.
 pub fn gateway_router(engine: GatewayEngine) -> Router {
     let public = Router::new()
-        // Embedded Web Console
-        .route("/", get(handle_ui))
-        .route("/ui", get(handle_ui))
+        .route("/", get(handle_root))
         // Core chat completions, Anthropic/Responses native, multimodal passthrough & health
         .route("/v1/chat/completions", post(admin::handle_chat_completions))
         .route("/gateway/v1/chat/completions", post(admin::handle_chat_completions))
@@ -202,12 +267,27 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/settings", get(admin::handle_get_settings).post(admin::handle_update_settings))
         .layer(middleware::from_fn(admin_auth_middleware));
 
-    public.merge(admin_routes).with_state(engine)
+    // CORS sits outside every other layer so preflights never reach auth or concurrency checks.
+    public.merge(admin_routes).with_state(engine).layer(middleware::from_fn(cors_middleware))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{admin_access, AdminAccess::*};
+
+    #[test]
+    fn only_the_console_and_local_dev_origins_are_allowed() {
+        use super::origin_allowed;
+        let allowed = vec!["https://nannndev.github.io".to_string()];
+        assert!(origin_allowed("https://nannndev.github.io", &allowed));
+        assert!(origin_allowed("http://localhost:5173", &allowed));
+        assert!(origin_allowed("http://127.0.0.1:4173", &allowed));
+        assert!(!origin_allowed("https://evil.example", &allowed));
+        assert!(!origin_allowed("https://nannndev.github.io.evil.example", &allowed));
+        assert!(!origin_allowed("http://localhost.evil.example:80", &allowed));
+        assert!(!origin_allowed("http://localhost:", &allowed));
+        assert!(!origin_allowed("null", &allowed));
+    }
 
     #[test]
     fn admin_tokens_grant_full_or_read_only_access() {

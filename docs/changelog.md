@@ -11,9 +11,9 @@ All notable changes to **eay-gateway** are listed below.
 - **Multi-access:** per-key `max_concurrent`; rate limits count requests, not failover attempts.
 - **MCP:** servers stay running between calls, config import from other apps, run a tool directly, long tool names shortened, image results passed as images, stderr in errors.
 - **Limits:** 64 MB request bodies, 300 s upstream silence cut-off.
-- **Console:** rebuilt around every API with a streaming playground and live route trace.
+- **Headless:** the web console moved to its own app, [eay-console](https://github.com/nannndev/eay-console); the gateway allows it through `--console-origin` and refuses other web pages.
 
-Upgrade notes: older sessions are not loaded (they were not tied to a key); reaching admin through a non-loopback hostname without `--admin-token` now returns `403`.
+Upgrade notes: the console moved out of `/ui` to [eay-console](https://github.com/nannndev/eay-console); older sessions are not loaded (they were not tied to a key); reaching admin through a non-loopback hostname without `--admin-token` now returns `403`.
 
 ## v0.2.0 — 2026-11-18
 

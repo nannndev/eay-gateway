@@ -1,6 +1,6 @@
 # eay-gateway
 
-One local, OpenAI-, Anthropic-, and Responses-compatible AI gateway for all your subscriptions and API keys — with an embedded Web Control Console, multimodal routing, reusable Skills/Agents, guardrails, and live subagent activity.
+One local, OpenAI-, Anthropic-, and Responses-compatible AI gateway for all your subscriptions and API keys — with multimodal routing, reusable Skills/Agents, guardrails, MCP tools, and live subagent activity. The web console is a separate app: [eay-console](https://github.com/nannndev/eay-console).
 
 Point **Claude Code**, **Codex**, **Cursor**, **OpenNotchi**, or any OpenAI/Anthropic SDK at `http://127.0.0.1:20129`.
 The gateway sends each request to one of your connected accounts and automatically fails over to the next one when an account is rate-limited, out of quota, or down.
@@ -17,18 +17,18 @@ The gateway sends each request to one of your connected accounts and automatical
 - **Smart Routing & Failover:** `auto`, `<alias>/auto`, custom combos (`auto/coding`), priority / round-robin / fill-first, and automatic cooldowns after rate limits
 - **Multimodal & Code-Ready:** Translates images, PDFs, video, and audio across Anthropic, Gemini, and Codex; automatically decodes plain-text/code file attachments for text-only models and skips text-only providers when `auto` receives binary media
 - **Skills, Agent Personalities & Session Memory:**
-  - Reusable **Skills** (`+skill`, `x-eay-skills`, or upload `SKILL.md` in the console)
+  - Reusable **Skills** (`+skill`, `x-eay-skills`, or upload `SKILL.md` in eay-console)
   - **Agent Profiles** (`agent/<name>`) combining model/combo, skills, personality, and tuning
   - **Session Memory** via `x-eay-session-id`
 - **Guardrails & Budgets:** Virtual keys (`gw-sk-…`) with per-key `allowed_providers`, `rate_limit_per_min`, `max_concurrent`, `max_tokens_budget`, `max_cost_usd`, private session memory, plus optional secret redaction (`x-eay-redact: true`) and context trimming (`x-eay-max-context-chars`)
 - **External MCP Connectors (`x-eay-mcp`):** Connect local `stdio` MCP servers (Filesystem, GitHub, Postgres) and Streamable HTTP remote MCP servers (Notion, Linear, Figma) with custom auth headers and automatic tool execution loops; local servers stay running between calls, and configs import straight from Claude Desktop, Claude Code, Cursor or VS Code
-- **Embedded Web Console & Live Activity:** Open `http://127.0.0.1:20129/` (or `/ui`) to log in via OAuth, inspect live quotas, configure routing & combos, manage skills/agents/MCP/keys, test in Playground, and watch **real-time subagent & request phases** (`preparing`, `routing`, `thinking`, `calling_tool` with file/line/diff metadata, `generating`, `failover`, `completed`) over SSE
+- **Web Console & Live Activity:** [eay-console](https://github.com/nannndev/eay-console) (a separate web app) logs in via OAuth, shows live quotas, configures routing & combos, manages skills/agents/MCP/keys, has a Playground, and watches **real-time subagent & request phases** (`preparing`, `routing`, `thinking`, `calling_tool` with file/line/diff metadata, `generating`, `failover`, `completed`) over SSE
 
 ## Quick start
 
 ```sh
-git clone --recurse-submodules https://github.com/nannndev/eay-gateway && cd eay-gateway
-cargo run --release --bin eay-gateway       # http://127.0.0.1:20129 (Web Console at /ui)
+git clone https://github.com/nannndev/eay-gateway && cd eay-gateway
+cargo run --release --bin eay-gateway       # http://127.0.0.1:20129
 ```
 
 Connect a provider, then send a request:
@@ -73,6 +73,7 @@ npm run docs:dev    # http://localhost:5173
 ## Security
 
 - By default the gateway binds to `127.0.0.1` without admin authentication, and admin routes accept only loopback `Host` headers. If you expose it beyond localhost, pass `--admin-token <TOKEN>` (or set `EAY_GATEWAY_ADMIN_TOKEN`) to protect `/gateway/admin/*`. Add `--admin-read-token <TOKEN>` for a token that can only read (dashboards, monitors).
+- Browser pages can only call the gateway from `http://localhost:<port>` or origins you allow with `--console-origin` (for a hosted [eay-console](https://github.com/nannndev/eay-console)); other sites get `403`.
 - API keys and OAuth tokens are encrypted on disk with AES-256-GCM, using a key file in the data folder.
 - Clients of `/v1/*` may present gateway-issued virtual keys (`gw-sk-…`) with per-key provider limits, rate limits, token/USD budgets, and default skills.
 

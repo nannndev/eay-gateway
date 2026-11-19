@@ -14,10 +14,12 @@ All notable changes to `eay-gateway` are documented in this file.
 - Subagents: `POST /gateway/admin/subagents/:id/cancel`, `GET …/:id?wait=N` to join on a run, `parent_id`, `mcp`, `api_key` (runs under that key's limits), at most 8 running at once, history kept across restarts.
 - `x-eay-run-id` header to follow your own request on `/gateway/admin/events`.
 - MCP: `POST /gateway/admin/mcp/import` (Claude Desktop / Claude Code / Cursor / VS Code configs), `POST /gateway/admin/mcp/:name/call` to run one tool directly.
-- Web console rebuilt around every API, with a streaming playground (three protocols, attachments, live route trace, embeddings/image/speech/transcription).
+- `--console-origin` / `EAY_GATEWAY_CONSOLE_ORIGINS`: browser origins allowed to call the gateway (CORS, including Chrome's Private Network Access preflight). `http://localhost:<port>` is always allowed.
 - End-to-end tests against a mock upstream and mock MCP servers.
 
 ### Changed
+- **The web console is no longer embedded.** It moved to [eay-console](https://github.com/nannndev/eay-console), a separate app that calls the gateway's API. `GET /` returns a JSON description and `/ui` is gone.
+- Browser requests from origins that are not allowed now get `403` (requests without an `Origin`, like CLIs and SDKs, are unaffected).
 - `/v1/responses` streams real Responses events (text, function calls, usage) and forwards function tools, `tool_choice` and `function_call` history, so Codex CLI tool use works through the gateway.
 - Local MCP servers stay running between calls (stateful servers keep their state); remote ones reuse their `mcp-session-id`. Tool lists are cached.
 - MCP tool names over 64 characters are shortened to a stable form; image results reach the model as images; errors include the server's stderr.
@@ -29,6 +31,7 @@ All notable changes to `eay-gateway` are documented in this file.
 - Session memory is now saved for streamed replies (it only worked for non-streaming requests).
 
 ### Upgrade notes
+- The console is no longer at `/ui`. Run [eay-console](https://github.com/nannndev/eay-console) instead; a hosted copy needs `--console-origin <its origin>`.
 - Sessions saved before this version are not loaded any more (they were not tied to a key). Delete them with `DELETE /gateway/admin/sessions/:id`.
 - If you reach the admin API through a hostname other than `localhost`/`127.0.0.1` without `--admin-token`, it now returns `403`. Set an admin token.
 

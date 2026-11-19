@@ -15,8 +15,6 @@ jobs:
         os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true # web console (eay-console) is embedded at build time
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

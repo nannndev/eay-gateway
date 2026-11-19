@@ -7,8 +7,29 @@
 | `--host <HOST>` | `EAY_GATEWAY_HOST` | `127.0.0.1` | Keep it on localhost; the admin API has no auth |
 | `--port <PORT>` | `EAY_GATEWAY_PORT` | `20129` | |
 | `--data-dir <PATH>` | `EAY_GATEWAY_DATA_DIR` | see below | |
+| `--admin-token <T>` | `EAY_GATEWAY_ADMIN_TOKEN` | off | Full admin access token |
+| `--admin-read-token <T>` | `EAY_GATEWAY_ADMIN_READ_TOKEN` | off | Admin token that can only `GET` |
+| `--console-origin <O>` | `EAY_GATEWAY_CONSOLE_ORIGINS` | off | Browser origin(s), comma-separated, allowed to call the gateway (see below) |
 | `--idle-exit <MIN>` | | off | Exit after MIN minutes with no HTTP requests |
 | `-h`, `--help` | | | |
+
+## Web console and browser access
+
+The gateway has no web UI of its own; `GET /` returns a short JSON description. The web console is
+a separate app, [eay-console](https://github.com/nannndev/eay-console), that calls the gateway's API
+from the browser.
+
+Browsers send an `Origin` header, and the gateway only answers origins it trusts:
+
+- `http://localhost:<port>`, `http://127.0.0.1:<port>` and `http://[::1]:<port>` are always allowed,
+  so a console running locally works with no setup.
+- A hosted console needs its origin listed: `--console-origin https://nannndev.github.io`.
+- Any other web page gets `403`, including simple form posts and uploads, so a site you visit
+  cannot use your gateway.
+- Requests without an `Origin` (CLIs, SDKs, desktop apps calling from native code) are not affected.
+
+Allowed preflights also answer Chrome's Private Network Access check, which a public page needs
+before it can call `127.0.0.1`. If you expose the gateway beyond localhost, set `--admin-token` too.
 
 The older `NOTCHI_GATEWAY_HOST`, `NOTCHI_GATEWAY_PORT` and `NOTCHI_GATEWAY_DATA_DIR` names are
 still read when the `EAY_GATEWAY_*` ones are unset.
