@@ -33,8 +33,8 @@ jobs:
       - name: Install zig and cargo-zigbuild
         if: matrix.zig
         run: |
-          pip3 install --user ziglang==0.13.0
-          cargo install --locked cargo-zigbuild --version 0.19.8
+          pip3 install --user ziglang==0.15.2
+          cargo install --locked cargo-zigbuild --version 0.24.1
       - name: Build
         shell: bash
         run: |

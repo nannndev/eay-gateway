@@ -40,7 +40,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: pip3 install --user ziglang==0.13.0 && cargo install --locked cargo-zigbuild --version 0.19.8
+      - run: pip3 install --user ziglang==0.15.2 && cargo install --locked cargo-zigbuild --version 0.24.1
       - run: cargo zigbuild --release --locked --bin eay-gateway --target ${{ matrix.target }}
       - name: Static, and runs on Alpine and Ubuntu 20.04
         run: |
