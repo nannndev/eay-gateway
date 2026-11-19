@@ -290,6 +290,7 @@ impl GatewayEngine {
             (r, "claude")
         } else {
             let mut b = body.clone();
+            crate::translate::strip_gateway_fields(&mut b);
             b["model"] = json!(target.model);
             b["stream"] = json!(true);
             b["stream_options"] = json!({ "include_usage": true });
@@ -677,7 +678,14 @@ impl GatewayEngine {
         let mut hist = self.store.get_session_messages(sid);
         hist.extend(incoming_turns.iter().cloned());
         if let Some(assistant_msg) = reply_json.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message")) {
-            hist.push(assistant_msg.clone());
+            // Memory keeps what was said, not the model's private reasoning (it is large and
+            // some providers reject it in later turns).
+            let mut m = assistant_msg.clone();
+            if let Some(o) = m.as_object_mut() {
+                o.remove("reasoning_content");
+                o.remove("thinking_blocks");
+            }
+            hist.push(m);
         }
         let _ = self.store.save_session_messages(sid, &hist);
     }

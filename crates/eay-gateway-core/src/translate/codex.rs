@@ -119,6 +119,9 @@ pub fn openai_to_codex(body: &Value, upstream_model: &str) -> Value {
             out["parallel_tool_calls"] = json!(true);
         }
     }
+    if let Some(effort) = super::reasoning_effort(body) {
+        out["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+    }
 
     out
 }
@@ -171,7 +174,11 @@ impl CodexStreamTranslator {
         let mut chunks = Vec::new();
         let ev_type = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        if ev_type == "response.output_text.delta" {
+        if ev_type == "response.reasoning_summary_text.delta" || ev_type == "response.reasoning_text.delta" {
+            if let Some(t) = ev["delta"].as_str().filter(|t| !t.is_empty()) {
+                chunks.push(self.chunk_data(json!({ "reasoning_content": t }), None));
+            }
+        } else if ev_type == "response.output_text.delta" {
             if let Some(delta_str) = ev.get("delta").and_then(|d| d.as_str()) {
                 if !delta_str.is_empty() {
                     chunks.push(self.chunk_data(json!({ "content": delta_str }), None));
@@ -328,6 +335,9 @@ pub fn responses_to_openai(body: &Value) -> Value {
         if let Some(p) = body.get("parallel_tool_calls").filter(|v| v.is_boolean()) {
             out["parallel_tool_calls"] = p.clone();
         }
+    }
+    if let Some(effort) = body["reasoning"]["effort"].as_str().filter(|e| !e.is_empty()) {
+        out["reasoning_effort"] = json!(effort);
     }
     if out["stream"] == true {
         out["stream_options"] = json!({ "include_usage": true });

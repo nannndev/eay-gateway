@@ -329,3 +329,19 @@ async fn http_mcp_reuses_its_session_and_passes_images_to_the_model() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(*inits.lock().unwrap(), 1);
 }
+
+#[tokio::test]
+async fn claude_code_thinking_reaches_an_openai_upstream_as_reasoning_effort() {
+    let gw = gateway(false).await;
+    let req = json!({
+        "model": "claude-sonnet-5-5", "max_tokens": 2000, "stream": true,
+        "thinking": { "type": "enabled", "budget_tokens": 31999 },
+        "messages": [{ "role": "user", "content": "ping" }]
+    });
+    let (st, body) = post_raw(&gw.app, "/v1/messages", req, &[]).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let sent = gw.seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(sent["reasoning_effort"], "high", "{sent}");
+    assert!(sent.get("thinking_budget_tokens").is_none(), "gateway-only field leaked upstream: {sent}");
+    assert!(sent.get("thinking").is_none());
+}
