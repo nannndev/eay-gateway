@@ -2,6 +2,19 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
+## [0.3.1] - 2026-11-19
+
+### Changed
+- **Linux binaries are static** (musl + rustls): one file with no glibc or OpenSSL dependency, so
+  it runs on any distribution, including Ubuntu 20.04/22.04, Debian 11/12 and Alpine. The 0.3.0
+  Linux binary needed glibc 2.39 (Ubuntu 24.04+).
+- New **Linux ARM64** binary (`eay-gateway-aarch64-unknown-linux-musl`) for Raspberry Pi and ARM VPS.
+- HTTPS to providers uses rustls with the system's certificates, falling back to built-in roots
+  when the system has none. The Docker image no longer needs OpenSSL.
+
+The x64 Linux binary is still also published as `eay-gateway-x86_64-unknown-linux-gnu`, so existing
+download links keep working.
+
 ## [0.3.0] - 2026-11-19
 
 ### Security

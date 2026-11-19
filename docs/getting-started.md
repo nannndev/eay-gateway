@@ -16,7 +16,11 @@ brew services start eay-gateway     # start now and at login
 |---|---|
 | macOS (Apple Silicon + Intel) | `eay-gateway-universal-apple-darwin` |
 | Windows x64 | `eay-gateway-x86_64-pc-windows-msvc.exe` |
-| Linux x64 | `eay-gateway-x86_64-unknown-linux-gnu` |
+| Linux x64 | `eay-gateway-x86_64-unknown-linux-musl` (also published as `…-linux-gnu`) |
+| Linux ARM64 (Raspberry Pi, ARM VPS) | `eay-gateway-aarch64-unknown-linux-musl` |
+
+Linux binaries are fully static: one file, no glibc or OpenSSL needed, so they run on any
+distribution (Ubuntu 20.04+, Debian, Alpine, …).
 
 **From source** (Rust 1.89 or newer):
 
@@ -81,8 +85,8 @@ the Kiro IDE, the Command Code CLI and MiMo Desktop. See [Providers](providers.m
 ## On a server, NAS or Raspberry Pi (Docker)
 
 On your own computer, use Homebrew or the binary above. Docker fits a gateway that runs on a home
-server, NAS or VPS and is shared by your machines or a team. It is also the way to run on Linux
-ARM (Raspberry Pi), which has no prebuilt binary yet.
+server, NAS or VPS and is shared by your machines or a team. On a single machine the static Linux
+binary plus `eay-gateway service install` does the same job with less setup.
 
 ```sh
 docker run -d --name eay-gateway --restart unless-stopped \

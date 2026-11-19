@@ -22,3 +22,41 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  linux-static:
+    # The release ships static musl Linux binaries; build them on every change and prove they run
+    # on distros the old glibc build could not (Alpine, Ubuntu 20.04).
+    name: linux-static (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: pip3 install --user ziglang==0.13.0 && cargo install --locked cargo-zigbuild --version 0.19.8
+      - run: cargo zigbuild --release --locked --bin eay-gateway --target ${{ matrix.target }}
+      - name: Static, and runs on Alpine and Ubuntu 20.04
+        run: |
+          f=target/${{ matrix.target }}/release/eay-gateway
+          file "$f"
+          file "$f" | grep -q "statically linked"
+          arch=amd64; [[ "${{ matrix.target }}" == aarch64* ]] && arch=arm64
+          [ "$arch" = arm64 ] && docker run --rm --privileged tonistiigi/binfmt --install arm64
+          for img in alpine:3.20 ubuntu:20.04; do
+            docker run --rm --platform linux/$arch -v "$PWD/$f:/eay:ro" "$img" /eay --version
+          done
+          # HTTPS from a minimal image with no CA bundle: the built-in roots must be enough. A wrong
+          # key only comes back as "Authentication failed" if the TLS connection to DeepSeek worked.
+          docker run --rm --platform linux/$arch -v "$PWD/$f:/eay:ro" alpine:3.20 sh -c '
+            /eay --port 20199 --data-dir /tmp/d & sleep 2
+            wget -qO- --content-on-error --header "content-type: application/json" \
+              --post-data "{\"api_key\":\"sk-invalid\"}" \
+              http://127.0.0.1:20199/gateway/admin/providers/deepseek/connect' | tee /tmp/out.txt || true
+          grep -q "Authentication failed" /tmp/out.txt

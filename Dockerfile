@@ -4,14 +4,13 @@
 #     -e EAY_GATEWAY_ADMIN_TOKEN=change-me ghcr.io/nannndev/eay-gateway
 
 FROM rust:1-slim-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked --bin eay-gateway
 
 FROM debian:bookworm-slim
-# ca-certificates for HTTPS to providers, libssl3 for the TLS backend; tini reaps MCP child processes.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 tini \
+# ca-certificates so certificates added to the image are trusted too; tini reaps MCP child processes.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin eay \
  && mkdir /data && chown eay /data
