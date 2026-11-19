@@ -2,7 +2,7 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-19
 
 ### Security
 - Without an admin token, `/gateway/admin/*` and the `x-eay-mcp` header only accept loopback `Host` headers. This blocks DNS rebinding from a web page, which could otherwise register a local (stdio) MCP server and run a command.

@@ -2,7 +2,7 @@
 
 All notable changes to **eay-gateway** are listed below.
 
-## Unreleased
+## v0.3.0 — 2026-11-19
 
 ### Highlights
 - **Safer by default:** admin API and MCP tools are loopback-only without an admin token (blocks DNS rebinding); new read-only admin token; session memory is private per key.
