@@ -63,3 +63,15 @@ To run a separate, isolated gateway on purpose, give it its own `--port` and `--
 - **Quotas:** fetched on demand by `GET /gateway/admin/accounts/usage` and cached for 2 minutes per
   account. A failed read keeps the last good values.
 - **Tokens:** OAuth access tokens are refreshed shortly before they expire, and once more on a 401.
+
+## Limits
+
+| Limit | Value | What happens |
+|---|---|---|
+| Request body | 64 MB | Larger bodies get `413`. Fits long agent contexts, inline images/PDFs and audio uploads. |
+| Upstream connect | 10 s | The next provider is tried. |
+| Upstream silence | 300 s | A provider that sends nothing for this long (mid-stream too) is cut off; long generations that keep streaming are not affected. |
+| Concurrent subagents | 8 | Extra subagents wait in `queued`. |
+| Per-key requests in flight | `max_concurrent` on the key | Over the cap → `429`. |
+| MCP `tools/call` | 120 s | The tool returns an error to the model. |
+| Idle local MCP server | 10 min | The process exits; the next call starts it again. |

@@ -48,7 +48,8 @@ Forwards `multipart/form-data` audio uploads (`file`, `model`, …) to connected
 | Header | Description |
 |---|---|
 | `x-eay-skills` | Comma-separated skill names to inject into the system prompt (alternative to `model+skill` suffix) |
-| `x-eay-session-id` | Persist and replay conversation history for this session id in SQLite |
+| `x-eay-session-id` | Works with streaming and non-streaming requests. Persist and replay conversation history for this session id in SQLite. Sessions are private to the caller: each virtual key (and the no-key local caller) has its own namespace, so the same id under two keys is two different sessions |
+| `x-eay-run-id` | Your own id for this request (≤64 chars, `[A-Za-z0-9_-]`), so you can follow it on `/gateway/admin/events` |
 | `x-eay-max-context-chars` | Trim older non-system messages when total characters exceed this limit |
 | `x-eay-redact` | Set to `true` or `1` to redact common API keys/tokens in user messages before forwarding upstream |
 | `x-eay-mcp` | Comma-separated external MCP server names (or `*` for all enabled) to attach and execute MCP tools automatically |
@@ -74,7 +75,7 @@ accepted, as they come from this machine. A `gw-sk-…` key must exist and be en
 | | |
 |---|---|
 | `GET /gateway/admin/keys` | List keys (prefix only, plus usage totals and limits) |
-| `POST /gateway/admin/keys` | `{"name":"ci","allowed_providers":["deepseek"],"rate_limit_per_min":30,"max_tokens_budget":100000,"max_cost_usd":5.0,"default_skills":["rust"]}` → returns the secret `key` once |
+| `POST /gateway/admin/keys` | `{"name":"ci","allowed_providers":["deepseek"],"rate_limit_per_min":30,"max_tokens_budget":100000,"max_cost_usd":5.0,"max_concurrent":4,"default_skills":["rust"]}` → returns the secret `key` once. `rate_limit_per_min` counts client requests (failover attempts and MCP tool rounds inside one request do not count extra). `max_concurrent` caps requests in flight at once (a streamed response holds its slot until it ends); over the cap → `429` |
 | `PATCH /gateway/admin/keys/:id/toggle` | Enable / disable |
 | `DELETE /gateway/admin/keys/:id` | Delete |
 
@@ -143,6 +144,8 @@ provider id.
 ## Skills, Agents, Sessions & Live Activity
 
 If `EAY_GATEWAY_ADMIN_TOKEN` (or `--admin-token`) is set, all `/gateway/admin/*` endpoints require `Authorization: Bearer <token>` or `x-admin-token: <token>`.
+`EAY_GATEWAY_ADMIN_READ_TOKEN` (or `--admin-read-token`) adds a second token that can only make `GET` requests (stats, activity, lists), for dashboards and monitors; writes with it get `403`.
+Without a token, `/gateway/admin/*` and the `x-eay-mcp` header only work when the `Host` header is `localhost`, `127.0.0.1` or `[::1]` (blocks DNS-rebinding from web pages); other hosts get `403`.
 
 | | |
 |---|---|
@@ -159,11 +162,20 @@ If `EAY_GATEWAY_ADMIN_TOKEN` (or `--admin-token`) is set, all `/gateway/admin/*`
 | `GET /gateway/admin/events` | SSE stream of real-time request & subagent activity phases (`queued`, `preparing`, `routing`, `waiting_upstream`, `thinking`, `calling_tool`, `generating`, `failover`, `completed`, `failed`), including structured `meta` (`action`, `file`, `lines`, `added`, `removed`, `command`, `duration_ms`) |
 | `GET /gateway/admin/activity` | JSON snapshot of recent `events` and `subagents` |
 | `GET /gateway/admin/subagents` | List active and recent background subagent runs |
-| `POST /gateway/admin/subagents` | Spawn a background subagent `{"role":"Reviewer","model":"auto","prompt":"…","skills":[…]}` |
-| `GET /gateway/admin/subagents/:id` | Get subagent status and output |
-| `DELETE /gateway/admin/subagents/:id` | Remove a subagent entry |
+| `POST /gateway/admin/subagents` | Spawn a background subagent `{"role":"Reviewer","model":"auto","prompt":"…","skills":[…],"mcp":["*"],"parent_id":"sub_…","api_key":"gw-sk-…"}`. `mcp` gives it MCP tools, `parent_id` links it into an agent tree, `api_key` (or header `x-eay-key`) makes it run under that key's budget and limits. At most 8 run at once; the rest wait in `queued` |
+| `GET /gateway/admin/subagents/:id` | Get subagent status and output. `?wait=60` long-polls up to that many seconds (max 300) until it finishes, so an orchestrator can join on a child |
+| `POST /gateway/admin/subagents/:id/cancel` | Stop a queued or running subagent (phase becomes `cancelled`) |
+| `DELETE /gateway/admin/subagents/:id` | Cancel it if still running and remove it from history |
 | `GET /gateway/admin/mcp` | List registered external MCP servers (`stdio` / `http`) |
 | `POST /gateway/admin/mcp` | Save an MCP server (`{"name":"notion","transport":"http","url":"https://mcp.notion.com/mcp","headers":{"Authorization":"Bearer …"}}` or `stdio` with `command`, `args`, `env`) |
 | `PATCH /gateway/admin/mcp/:name/toggle` | Enable / disable an MCP server |
 | `DELETE /gateway/admin/mcp/:name` | Delete an MCP server |
 | `POST /gateway/admin/mcp/:name/tools` | Connect to the MCP server and list its available tools |
+
+Tool names shown to the model are `mcp__<server>__<tool>`; names over 64 characters or with characters outside `[A-Za-z0-9_-]` are shortened to a stable `…_<hash>` form, which the gateway maps back to the real tool.
+
+Remote (`http`) servers keep their `mcp-session-id` between calls and start a new session if the server answers `404`. Image results are passed to the model as images; audio and binary resources become a short note. When a local server fails, the error includes the last lines it wrote to stderr.
+
+Local (`stdio`) MCP servers are started once and kept running between calls, so stateful servers (browsers, database sessions) keep their state. An idle process exits after 10 minutes; editing, disabling or deleting a server stops it. Calls to one server run one at a time; `tools/call` may take up to 120 s.
+| `POST /gateway/admin/mcp/:name/call` | Run one tool directly: `{"tool":"read_file","arguments":{…}}` → `{"ok":true,"output":"…","duration_ms":12}` |
+| `POST /gateway/admin/mcp/import` | Add every server from a Claude Desktop / Claude Code / Cursor (`mcpServers`) or VS Code (`servers`) config; returns `imported` and per-server `errors` |

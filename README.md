@@ -72,7 +72,7 @@ npm run docs:dev    # http://localhost:5173
 
 ## Security
 
-- By default the gateway binds to `127.0.0.1` without admin authentication. If you expose it beyond localhost, pass `--admin-token <TOKEN>` (or set `EAY_GATEWAY_ADMIN_TOKEN`) to protect `/gateway/admin/*`.
+- By default the gateway binds to `127.0.0.1` without admin authentication, and admin routes accept only loopback `Host` headers. If you expose it beyond localhost, pass `--admin-token <TOKEN>` (or set `EAY_GATEWAY_ADMIN_TOKEN`) to protect `/gateway/admin/*`.
 - API keys and OAuth tokens are encrypted on disk with AES-256-GCM, using a key file in the data folder.
 - Clients of `/v1/*` may present gateway-issued virtual keys (`gw-sk-…`) with per-key provider limits, rate limits, token/USD budgets, and default skills.
 
