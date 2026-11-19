@@ -12,7 +12,7 @@ pub use anthropic::{
     anthropic_to_openai, openai_completion_to_anthropic, openai_to_anthropic, openai_to_claude_oauth, OpenAiToAnthropicSse,
     CLAUDE_CODE_SYSTEM,
 };
-pub use codex::{openai_completion_to_responses, openai_to_codex, responses_to_openai, CodexStreamTranslator};
+pub use codex::{openai_completion_to_responses, openai_to_codex, responses_to_openai, CodexStreamTranslator, OpenAiToResponsesSse};
 pub use commandcode::openai_to_commandcode;
 pub use gemini::{antigravity_envelope, openai_to_gemini};
 pub use media::{detect_media_requirements, normalize_text_documents, MediaRequirements};

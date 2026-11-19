@@ -39,7 +39,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd FROM keys ORDER BY created_at DESC",
+            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd, max_concurrent FROM keys ORDER BY created_at DESC",
             [],
             |r| {
                 let allowed_providers_json: Option<String> = r.get(4)?;
@@ -56,6 +56,7 @@ impl GatewayStore {
                     max_tokens_budget: r.get(12)?,
                     max_cost_usd: r.get(13)?,
                     default_skills,
+                    max_concurrent: r.get(14)?,
                     created_at: r.get(6)?,
                     last_used_at: r.get(7)?,
                     total_requests: r.get(8)?,
@@ -100,6 +101,7 @@ impl GatewayStore {
             max_tokens_budget: None,
             max_cost_usd: None,
             default_skills: None,
+            max_concurrent: None,
             created_at,
             last_used_at: None,
             total_requests: 0,
@@ -116,6 +118,13 @@ impl GatewayStore {
             params![max_tokens_budget, max_cost_usd, id],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_virtual_key_concurrency(&self, id: &str, max_concurrent: Option<i64>) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute("UPDATE keys SET max_concurrent = ?1 WHERE id = ?2", params![max_concurrent.filter(|n| *n > 0), id])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -338,6 +347,31 @@ impl GatewayStore {
         let conn = self.conn.lock();
         let rows = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
         Ok(rows > 0)
+    }
+
+    // ---- Subagent run history ------------------------------------------
+    /// Keeps the newest 500 finished runs; enough history without unbounded growth.
+    pub fn save_subagent_run(&self, run: &crate::engine::SubagentRun) {
+        let Ok(data) = serde_json::to_string(run) else { return };
+        let conn = self.conn.lock();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO subagent_runs (id, data, updated_at) VALUES (?1, ?2, ?3)",
+            params![run.id, data, run.updated_at],
+        );
+        let _ =
+            conn.execute("DELETE FROM subagent_runs WHERE id NOT IN (SELECT id FROM subagent_runs ORDER BY updated_at DESC LIMIT 500)", []);
+    }
+
+    pub fn list_subagent_runs(&self, limit: usize) -> Vec<crate::engine::SubagentRun> {
+        let conn = self.conn.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT data FROM subagent_runs ORDER BY updated_at DESC LIMIT ?1") else { return Vec::new() };
+        stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))
+            .map(|rows| rows.filter_map(Result::ok).filter_map(|d| serde_json::from_str(&d).ok()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn delete_subagent_run(&self, id: &str) {
+        let _ = self.conn.lock().execute("DELETE FROM subagent_runs WHERE id = ?1", params![id]);
     }
 
     // ---- External MCP Servers --------------------------------------

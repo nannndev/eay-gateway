@@ -53,19 +53,47 @@ pub struct SubagentRun {
     pub updated_at: f64,
     pub output: Option<String>,
     pub error: Option<String>,
+    /// Run or request that spawned this one (multi-agent trees).
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Virtual key the run was spawned under; its budget and limits apply.
+    #[serde(default)]
+    pub key_id: Option<String>,
 }
+
+impl SubagentRun {
+    pub fn is_finished(&self) -> bool {
+        matches!(self.phase.as_str(), "completed" | "failed" | "cancelled")
+    }
+}
+
+/// Finished runs kept in memory; older ones live only in the store.
+const MAX_KEPT_RUNS: usize = 200;
 
 #[derive(Clone)]
 pub struct ActivityHub {
     tx: broadcast::Sender<ActivityEvent>,
     recent: Arc<Mutex<VecDeque<ActivityEvent>>>,
     runs: Arc<Mutex<HashMap<String, SubagentRun>>>,
+    tasks: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+    /// Caps concurrent subagents so one prompt cannot fan out into hundreds of upstream calls.
+    pub slots: Arc<tokio::sync::Semaphore>,
+    done: Arc<tokio::sync::Notify>,
 }
+
+pub const MAX_CONCURRENT_SUBAGENTS: usize = 8;
 
 impl Default for ActivityHub {
     fn default() -> Self {
         let (tx, _) = broadcast::channel(256);
-        Self { tx, recent: Arc::new(Mutex::new(VecDeque::with_capacity(100))), runs: Default::default() }
+        Self {
+            tx,
+            recent: Arc::new(Mutex::new(VecDeque::with_capacity(100))),
+            runs: Default::default(),
+            tasks: Default::default(),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBAGENTS)),
+            done: Default::default(),
+        }
     }
 }
 
@@ -140,6 +168,18 @@ impl ActivityHub {
     }
 
     pub fn create_run(&self, id: String, parent_session: Option<String>, role: String, model: String) -> SubagentRun {
+        self.create_run_with(id, parent_session, role, model, None, None)
+    }
+
+    pub fn create_run_with(
+        &self,
+        id: String,
+        parent_session: Option<String>,
+        role: String,
+        model: String,
+        parent_id: Option<String>,
+        key_id: Option<String>,
+    ) -> SubagentRun {
         let ts = now();
         let run = SubagentRun {
             id: id.clone(),
@@ -154,15 +194,66 @@ impl ActivityHub {
             updated_at: ts,
             output: None,
             error: None,
+            parent_id: parent_id.clone(),
+            key_id,
         };
-        self.runs.lock().insert(id.clone(), run.clone());
-        self.emit_phase(&id, parent_session.as_deref(), Some(&role), "queued", format!("Queued subagent '{role}'"), None, None);
+        {
+            let mut runs = self.runs.lock();
+            runs.insert(id.clone(), run.clone());
+            prune_finished(&mut runs);
+        }
+        let parent = parent_id.as_deref().or(parent_session.as_deref());
+        self.emit_phase(&id, parent, Some(&role), "queued", format!("Queued subagent '{role}'"), None, None);
         run
     }
 
-    pub fn finish_run(&self, id: &str, output: Option<String>, error: Option<String>) {
+    pub fn attach_task(&self, id: &str, handle: tokio::task::AbortHandle) {
+        self.tasks.lock().insert(id.to_string(), handle);
+    }
+
+    /// Stops a running subagent's task. Returns false if it was not running.
+    pub fn cancel_run(&self, id: &str) -> bool {
+        let Some(h) = self.tasks.lock().remove(id) else { return false };
+        h.abort();
+        let role = {
+            let mut runs = self.runs.lock();
+            let Some(run) = runs.get_mut(id) else { return true };
+            run.phase = "cancelled".into();
+            run.status_message = "Cancelled".into();
+            run.updated_at = now();
+            run.role.clone()
+        };
+        self.emit_phase(id, None, Some(&role), "cancelled", "Cancelled", None, None);
+        self.done.notify_waiters();
+        true
+    }
+
+    /// Waits until the run finishes or `timeout` passes; returns its latest state.
+    pub async fn wait_run(&self, id: &str, timeout: std::time::Duration) -> Option<SubagentRun> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.done.notified();
+            let run = self.get_run(id)?;
+            if run.is_finished() {
+                return Some(run);
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.get_run(id);
+            }
+        }
+    }
+
+    pub fn finish_run(&self, id: &str, output: Option<String>, error: Option<String>) -> Option<SubagentRun> {
+        self.tasks.lock().remove(id);
+        let finished = self.finish_inner(id, output, error);
+        self.done.notify_waiters();
+        finished
+    }
+
+    fn finish_inner(&self, id: &str, output: Option<String>, error: Option<String>) -> Option<SubagentRun> {
         let mut runs = self.runs.lock();
-        if let Some(run) = runs.get_mut(id) {
+        let run = runs.get_mut(id)?;
+        {
             run.updated_at = now();
             if let Some(err) = error {
                 run.phase = "failed".into();
@@ -174,6 +265,16 @@ impl ActivityHub {
                 run.output = output;
             }
         }
+        Some(run.clone())
+    }
+
+    /// Restores finished runs saved in the store so history survives restarts.
+    pub fn restore_runs(&self, saved: Vec<SubagentRun>) {
+        let mut runs = self.runs.lock();
+        for r in saved {
+            runs.entry(r.id.clone()).or_insert(r);
+        }
+        prune_finished(&mut runs);
     }
 
     pub fn list_runs(&self) -> Vec<SubagentRun> {
@@ -187,7 +288,20 @@ impl ActivityHub {
     }
 
     pub fn delete_run(&self, id: &str) -> bool {
+        self.cancel_run(id);
         self.runs.lock().remove(id).is_some()
+    }
+}
+
+/// Drops the oldest finished runs beyond `MAX_KEPT_RUNS`; running ones are never dropped.
+fn prune_finished(runs: &mut HashMap<String, SubagentRun>) {
+    let mut finished: Vec<(f64, String)> = runs.values().filter(|r| r.is_finished()).map(|r| (r.updated_at, r.id.clone())).collect();
+    if finished.len() <= MAX_KEPT_RUNS {
+        return;
+    }
+    finished.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (_, id) in finished.into_iter().take(runs.len().saturating_sub(MAX_KEPT_RUNS)) {
+        runs.remove(&id);
     }
 }
 

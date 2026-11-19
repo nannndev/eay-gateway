@@ -119,6 +119,9 @@ pub struct VirtualKeyRecord {
     pub max_cost_usd: Option<f64>,
     #[serde(default)]
     pub default_skills: Option<Vec<String>>,
+    /// Requests this key may have in flight at once (agents fanning out); None = unlimited.
+    #[serde(default)]
+    pub max_concurrent: Option<i64>,
     pub created_at: f64,
     pub last_used_at: Option<f64>,
     pub total_requests: i64,

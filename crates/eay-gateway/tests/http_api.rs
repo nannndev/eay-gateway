@@ -33,6 +33,99 @@ async fn call(app: &Router, method: &str, uri: &str, body: Option<Value>, auth: 
     (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
+mod admin_host_guard {
+    use super::*;
+
+    async fn status_with_host(host: &str) -> StatusCode {
+        let (app, _dir) = app();
+        let req = Request::builder().uri("/gateway/admin/combos").header("host", host).body(Body::empty()).unwrap();
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn allows_loopback_hosts() {
+        for h in ["127.0.0.1:20129", "localhost:20129", "[::1]:20129", "localhost"] {
+            assert_eq!(status_with_host(h).await, StatusCode::OK, "{h}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_a_rebound_domain() {
+        assert_eq!(status_with_host("evil.example:20129").await, StatusCode::FORBIDDEN);
+    }
+}
+
+mod mcp_import {
+    use super::*;
+
+    #[tokio::test]
+    async fn imports_a_claude_desktop_config() {
+        let (app, _dir) = app();
+        let cfg = json!({ "mcpServers": {
+            "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "~"] },
+            "linear": { "url": "https://mcp.linear.app/mcp" }
+        }});
+        let (st, body) = call(&app, "POST", "/gateway/admin/mcp/import", Some(cfg), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["imported"].as_array().unwrap().len(), 2);
+        let (_, list) = call(&app, "GET", "/gateway/admin/mcp", None, None).await;
+        assert_eq!(list["mcp_servers"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_config_without_servers() {
+        let (app, _dir) = app();
+        let (st, _) = call(&app, "POST", "/gateway/admin/mcp/import", Some(json!({ "foo": 1 })), None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn calling_a_tool_on_an_unknown_server_is_404() {
+        let (app, _dir) = app();
+        let (st, _) = call(&app, "POST", "/gateway/admin/mcp/nope/call", Some(json!({ "tool": "x" })), None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+}
+
+mod key_concurrency {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_key_at_its_concurrency_limit_gets_429() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = GatewayEngine::new(GatewayStore::new(dir.path()).unwrap());
+        let app = gateway_router(engine.clone());
+        let (_, created) = call(&app, "POST", "/gateway/admin/keys", Some(json!({ "name": "agent", "max_concurrent": 1 })), None).await;
+        let secret = created["key"]["key"].as_str().unwrap().to_string();
+        let rec = engine.store.find_virtual_key(&secret).unwrap();
+        let _busy = engine.try_acquire_inflight(&rec).unwrap(); // simulate one request in flight
+        let (st, body) = call(&app, "POST", "/v1/chat/completions", Some(json!({ "model": "auto", "messages": [] })), Some(&secret)).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        drop(_busy);
+        let (st, _) = call(&app, "POST", "/v1/chat/completions", Some(json!({ "model": "auto", "messages": [] })), Some(&secret)).await;
+        assert_ne!(st, StatusCode::TOO_MANY_REQUESTS);
+    }
+}
+
+mod body_limit {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepts_a_request_larger_than_axums_2mb_default() {
+        let (app, _dir) = app();
+        let big = "x".repeat(5 * 1024 * 1024);
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/chat/completions",
+            Some(json!({ "model": "auto", "messages": [{ "role": "user", "content": big }] })),
+            None,
+        )
+        .await;
+        assert_ne!(st, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
 mod health {
     use super::*;
 

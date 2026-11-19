@@ -642,3 +642,102 @@ mod responses_native {
         assert_eq!(resp["usage"]["total_tokens"], 6);
     }
 }
+
+mod openai_to_responses_sse {
+    use super::super::OpenAiToResponsesSse;
+    use serde_json::{json, Value};
+
+    fn events(out: &str) -> Vec<Value> {
+        out.lines().filter_map(|l| l.strip_prefix("data: ")).map(|d| serde_json::from_str(d).unwrap()).collect()
+    }
+    fn chunk(v: Value) -> String {
+        format!("data: {v}\n\n")
+    }
+
+    #[test]
+    fn streams_text_as_output_text_deltas_and_completes() {
+        let mut c = OpenAiToResponsesSse::new("auto".into());
+        let mut out = c.feed_sse_chunk(&chunk(json!({"choices":[{"delta":{"content":"Hel"}}]})));
+        out += &c.feed_sse_chunk(&chunk(json!({"choices":[{"delta":{"content":"lo"}}]})));
+        out += &c.feed_sse_chunk(&chunk(json!({"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}})));
+        out += &c.feed_sse_chunk("data: [DONE]\n\n");
+        let ev = events(&out);
+        let types: Vec<&str> = ev.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(types[0], "response.created");
+        assert_eq!(
+            ev.iter().filter(|e| e["type"] == "response.output_text.delta").map(|e| e["delta"].as_str().unwrap()).collect::<String>(),
+            "Hello"
+        );
+        let done = ev.last().unwrap();
+        assert_eq!(done["type"], "response.completed");
+        assert_eq!(done["response"]["output"][0]["content"][0]["text"], "Hello");
+        assert_eq!(done["response"]["usage"]["total_tokens"], 5);
+        // sequence numbers strictly increase
+        assert!(ev.windows(2).all(|w| w[0]["sequence_number"].as_u64() < w[1]["sequence_number"].as_u64()));
+    }
+
+    #[test]
+    fn streams_tool_calls_as_function_call_items() {
+        let mut c = OpenAiToResponsesSse::new("auto".into());
+        let mut out = c.feed_sse_chunk(&chunk(
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}),
+        ));
+        out += &c.feed_sse_chunk(&chunk(
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ));
+        out += &c.finish();
+        let ev = events(&out);
+        let added = ev.iter().find(|e| e["type"] == "response.output_item.added").unwrap();
+        assert_eq!(added["item"]["type"], "function_call");
+        assert_eq!(added["item"]["name"], "shell");
+        let item = &ev.last().unwrap()["response"]["output"][0];
+        assert_eq!(item["call_id"], "call_1");
+        assert_eq!(item["arguments"], "{\"cmd\":\"ls\"}");
+    }
+
+    #[test]
+    fn finishing_twice_emits_completed_once() {
+        let mut c = OpenAiToResponsesSse::new("m".into());
+        let out = c.feed_sse_chunk("data: [DONE]\n\n") + &c.finish();
+        assert_eq!(events(&out).iter().filter(|e| e["type"] == "response.completed").count(), 1);
+    }
+}
+
+mod responses_request_to_openai {
+    use super::super::responses_to_openai;
+    use serde_json::json;
+
+    #[test]
+    fn carries_function_tools_and_drops_builtins() {
+        let out = responses_to_openai(&json!({
+            "model": "auto", "input": "hi", "tool_choice": { "type": "function", "name": "shell" },
+            "tools": [
+                { "type": "function", "name": "shell", "description": "run", "parameters": { "type": "object", "properties": { "cmd": { "type": "string" } } } },
+                { "type": "web_search" }
+            ]
+        }));
+        assert_eq!(out["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(out["tools"][0]["function"]["name"], "shell");
+        assert_eq!(out["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"], "string");
+        assert_eq!(out["tool_choice"]["function"]["name"], "shell");
+    }
+
+    #[test]
+    fn replays_a_tool_round_trip_from_the_input_history() {
+        let out = responses_to_openai(&json!({ "model": "auto", "input": [
+            { "role": "user", "content": "list files" },
+            { "type": "reasoning", "summary": [] },
+            { "type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{\"cmd\":\"ls\"}" },
+            { "type": "function_call", "call_id": "c2", "name": "shell", "arguments": "{\"cmd\":\"pwd\"}" },
+            { "type": "function_call_output", "call_id": "c1", "output": "a.txt" },
+            { "type": "function_call_output", "call_id": "c2", "output": "/tmp" }
+        ]}));
+        let m = out["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 4, "{out}");
+        assert_eq!(m[1]["role"], "assistant");
+        assert_eq!(m[1]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(m[1]["tool_calls"][1]["id"], "c2");
+        assert_eq!(m[2]["role"], "tool");
+        assert_eq!(m[2]["tool_call_id"], "c1");
+    }
+}

@@ -78,7 +78,7 @@ fn parse_args() -> Result<Config, String> {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "eay-gateway {}\n\nUSAGE:\n  eay-gateway [OPTIONS]\n\nOPTIONS:\n  --host <HOST>          Bind host (default: 127.0.0.1, env: EAY_GATEWAY_HOST)\n  --port <PORT>          Bind port (default: 20129, env: EAY_GATEWAY_PORT)\n  --data-dir <PATH>      Data directory (default: ~/.eay-gateway, env: EAY_GATEWAY_DATA_DIR)\n  --idle-exit <MIN>      Exit after MIN minutes without requests (for apps that share one gateway)\n  -h, --help             Print help",
+                    "eay-gateway {}\n\nUSAGE:\n  eay-gateway [OPTIONS]\n\nOPTIONS:\n  --host <HOST>          Bind host (default: 127.0.0.1, env: EAY_GATEWAY_HOST)\n  --port <PORT>          Bind port (default: 20129, env: EAY_GATEWAY_PORT)\n  --data-dir <PATH>      Data directory (default: ~/.eay-gateway, env: EAY_GATEWAY_DATA_DIR)\n  --admin-token <T>      Full admin access token (env: EAY_GATEWAY_ADMIN_TOKEN)\n  --admin-read-token <T> Read-only (GET) admin token (env: EAY_GATEWAY_ADMIN_READ_TOKEN)\n  --idle-exit <MIN>      Exit after MIN minutes without requests (for apps that share one gateway)\n  -h, --help             Print help",
                     env!("CARGO_PKG_VERSION")
                 );
                 std::process::exit(0);
@@ -97,6 +97,10 @@ fn parse_args() -> Result<Config, String> {
             "--admin-token" => {
                 let val = args.next().ok_or("--admin-token requires a value")?;
                 std::env::set_var("EAY_GATEWAY_ADMIN_TOKEN", val);
+            }
+            "--admin-read-token" => {
+                let val = args.next().ok_or("--admin-read-token requires a value")?;
+                std::env::set_var("EAY_GATEWAY_ADMIN_READ_TOKEN", val);
             }
             "--idle-exit" => {
                 let val = args.next().ok_or("--idle-exit requires minutes")?;
@@ -190,6 +194,7 @@ async fn main() {
     };
 
     let engine = GatewayEngine::new(store);
+    engine.restore_subagent_history();
     {
         // Keep provider model lists fresh: check hourly, refetch lists older than a day.
         let engine = engine.clone();

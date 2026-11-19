@@ -61,6 +61,11 @@ pub struct ChatError {
     pub body: Value,
 }
 
+/// Longest silence allowed from an upstream (reasoning models can think quietly for a while).
+const UPSTREAM_IDLE_SECS: u64 = 300;
+
+type McpToolsEntry = (std::time::Instant, Vec<Value>, crate::mcp::McpToolIndex);
+
 #[derive(Clone)]
 pub struct GatewayEngine {
     pub store: Arc<GatewayStore>,
@@ -74,6 +79,31 @@ pub struct GatewayEngine {
     rr: Arc<parking_lot::Mutex<HashMap<String, usize>>>,
     /// fill_first: the account that last succeeded, per provider.
     sticky: Arc<parking_lot::Mutex<HashMap<String, String>>>,
+    /// MCP `tools/list` per server, keyed by name+updated_at so an edit invalidates it.
+    mcp_tools: Arc<parking_lot::Mutex<HashMap<String, McpToolsEntry>>>,
+    /// In-flight request count per virtual key, for `max_concurrent`.
+    inflight: Arc<parking_lot::Mutex<HashMap<String, i64>>>,
+    /// Admission times per virtual key in the last minute, for `rate_limit_per_min`.
+    /// Counted once per client request, so failover attempts and MCP rounds do not use up the limit.
+    rate_window: Arc<parking_lot::Mutex<HashMap<String, std::collections::VecDeque<std::time::Instant>>>>,
+}
+
+/// Held for the life of one request (including its streamed body); frees the key's slot on drop.
+pub struct InflightGuard {
+    map: Arc<parking_lot::Mutex<HashMap<String, i64>>>,
+    key_id: String,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.lock();
+        if let Some(n) = m.get_mut(&self.key_id) {
+            *n -= 1;
+            if *n <= 0 {
+                m.remove(&self.key_id);
+            }
+        }
+    }
 }
 
 impl GatewayEngine {
@@ -81,13 +111,52 @@ impl GatewayEngine {
         Self {
             store: Arc::new(store),
             // Meta (Muse) answers UA-less requests with a 302 to a login page
-            http_client: Client::builder().user_agent(concat!("eay-gateway/", env!("CARGO_PKG_VERSION"))).build().unwrap_or_default(),
+            // connect_timeout: a dead host fails over fast. read_timeout resets on every chunk, so long
+            // generations keep going but an upstream that goes silent mid-stream is cut off.
+            http_client: Client::builder()
+                .user_agent(concat!("eay-gateway/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(UPSTREAM_IDLE_SECS))
+                .build()
+                .unwrap_or_default(),
             oauth: crate::oauth::OAuthManager::new(),
             quotas: Default::default(),
             activity: ActivityHub::default(),
             rr: Default::default(),
             sticky: Default::default(),
+            mcp_tools: Default::default(),
+            inflight: Default::default(),
+            rate_window: Default::default(),
         }
+    }
+
+    /// Admits one client request under the key's `rate_limit_per_min`.
+    /// shortcut: in-memory, so the window resets on restart; persist it if keys need hard guarantees across restarts.
+    pub fn admit_rate(&self, key: Option<&VirtualKeyRecord>) -> Result<(), ChatError> {
+        let Some(k) = key else { return Ok(()) };
+        let Some(limit) = k.rate_limit_per_min.filter(|l| *l > 0) else { return Ok(()) };
+        let now = std::time::Instant::now();
+        let mut w = self.rate_window.lock();
+        let q = w.entry(k.id.clone()).or_default();
+        while q.front().is_some_and(|t| now.duration_since(*t) >= std::time::Duration::from_secs(60)) {
+            q.pop_front();
+        }
+        if q.len() as i64 >= limit {
+            return Err(gateway_err(429, format!("Rate limit of {limit} requests/min reached for key '{}'", k.name)));
+        }
+        q.push_back(now);
+        Ok(())
+    }
+
+    /// Takes one of the key's concurrent-request slots, or None when all are busy.
+    pub fn try_acquire_inflight(&self, key: &VirtualKeyRecord) -> Option<InflightGuard> {
+        let mut m = self.inflight.lock();
+        let n = m.entry(key.id.clone()).or_insert(0);
+        if key.max_concurrent.is_some_and(|max| max > 0 && *n >= max) {
+            return None;
+        }
+        *n += 1;
+        Some(InflightGuard { map: self.inflight.clone(), key_id: key.id.clone() })
     }
 
     fn check_key_and_resolve(
@@ -97,11 +166,6 @@ impl GatewayEngine {
     ) -> Result<(Vec<Target>, GatewaySettings, String), ChatError> {
         let key_name = key.map(|k| k.name.clone()).unwrap_or_else(|| "AI Copilot".to_string());
         if let Some(k) = key {
-            if let Some(limit) = k.rate_limit_per_min.filter(|l| *l > 0) {
-                if self.store.key_requests_since(&k.id, crate::store::now() - 60.0) >= limit {
-                    return Err(gateway_err(429, format!("Rate limit of {limit} requests/min reached for key '{}'", k.name)));
-                }
-            }
             if let Some(tok_limit) = k.max_tokens_budget.filter(|l| *l > 0) {
                 if (k.total_input_tokens + k.total_output_tokens) >= tok_limit {
                     return Err(gateway_err(429, format!("Token budget of {tok_limit} reached for key '{}'", k.name)));
@@ -247,6 +311,7 @@ impl GatewayEngine {
         req_model: &str,
         payload: PassthroughPayload,
     ) -> Result<PassthroughReply, ChatError> {
+        self.admit_rate(key.as_ref())?;
         let (targets, settings, key_name) = self.check_key_and_resolve(key.as_ref(), req_model)?;
         let mut last_error = format!("no connected OpenAI-compatible provider can serve '{req_model}'");
 
@@ -354,6 +419,7 @@ impl GatewayEngine {
         mut body: Value,
         opts: ChatOptions,
     ) -> Result<ChatReply, ChatError> {
+        self.admit_rate(key.as_ref())?;
         normalize_text_documents(&mut body);
         let media_req = detect_media_requirements(&body);
         let raw_model = body.get("model").and_then(|m| m.as_str()).unwrap_or("auto").to_string();
@@ -399,7 +465,9 @@ impl GatewayEngine {
             .map(|arr| arr.iter().filter(|m| !matches!(m["role"].as_str(), Some("system" | "developer"))).cloned().collect())
             .unwrap_or_default();
 
-        if let Some(ref sid) = opts.session_id {
+        // Sessions are namespaced by caller so one key cannot read or extend another key's memory.
+        let session_key = opts.session_id.as_deref().map(|sid| session_storage_id(key.as_ref(), sid));
+        if let Some(ref sid) = session_key {
             let history = self.store.get_session_messages(sid);
             if !history.is_empty() {
                 if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
@@ -447,10 +515,11 @@ impl GatewayEngine {
         let mcp_records = self.resolve_mcp_servers(&opts.mcp_servers);
         if !mcp_records.is_empty() {
             let mut merged_tools = body.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+            let mut mcp_index = crate::mcp::McpToolIndex::default();
             for srv in &mcp_records {
-                if let Ok(srv_tools) = crate::mcp::list_tools_openai(&self.http_client, srv).await {
-                    merged_tools.extend(srv_tools);
-                }
+                let (tools, index) = self.mcp_tools_cached(srv).await;
+                merged_tools.extend(tools);
+                mcp_index.extend(index);
             }
             if !merged_tools.is_empty() {
                 body["tools"] = Value::Array(merged_tools);
@@ -476,29 +545,39 @@ impl GatewayEngine {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter(|tc| tc["function"]["name"].as_str().is_some_and(|n| crate::mcp::parse_tool_name(n).is_some()))
+                        .filter(|tc| tc["function"]["name"].as_str().is_some_and(|n| mcp_index.resolve(n).is_some()))
                         .cloned()
                         .collect();
                     if mcp_calls.is_empty() {
-                        if let Some(ref sid) = opts.session_id {
+                        if let Some(ref sid) = session_key {
                             self.append_session_turn(sid, &incoming_turns, &reply);
                         }
                         return Ok(if caller_stream { json_reply_to_sse(&reply) } else { ChatReply::Json(reply) });
                     }
                     if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
                         msgs.push(msg.clone());
+                        // Tool messages are text-only in chat/completions; images follow as one user turn.
+                        let mut tool_images: Vec<Value> = Vec::new();
                         for tc in mcp_calls {
                             let call_id = tc["id"].as_str().unwrap_or("");
                             let full_name = tc["function"]["name"].as_str().unwrap_or("");
                             let args: Value =
                                 serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
-                            let output = if let Some((srv_name, tool_name)) = crate::mcp::parse_tool_name(full_name) {
+                            let output = if let Some((srv_name, tool_name)) = mcp_index.resolve(full_name) {
                                 let (mut meta, msg_label) = build_tool_activity_meta(full_name, &args);
                                 let t_tool = std::time::Instant::now();
                                 let res = match mcp_records.iter().find(|s| s.name == srv_name) {
-                                    Some(srv) => crate::mcp::call_tool(&self.http_client, srv, tool_name, args)
-                                        .await
-                                        .unwrap_or_else(|e| format!("MCP error: {e}")),
+                                    Some(srv) => match crate::mcp::call_tool_rich(&self.http_client, srv, tool_name, args).await {
+                                        Ok(out) => {
+                                            tool_images.extend(
+                                                out.images
+                                                    .into_iter()
+                                                    .map(|url| json!({ "type": "image_url", "image_url": { "url": url } })),
+                                            );
+                                            out.text
+                                        }
+                                        Err(e) => format!("MCP error: {e}"),
+                                    },
                                     None => format!("MCP server '{srv_name}' not active"),
                                 };
                                 meta.duration_ms = Some(t_tool.elapsed().as_millis() as i64);
@@ -518,6 +597,11 @@ impl GatewayEngine {
                             };
                             msgs.push(json!({ "role": "tool", "tool_call_id": call_id, "content": output }));
                         }
+                        if !tool_images.is_empty() {
+                            let mut parts = vec![json!({ "type": "text", "text": "Images returned by the tool calls above:" })];
+                            parts.extend(tool_images);
+                            msgs.push(json!({ "role": "user", "content": parts }));
+                        }
                     }
                 }
             }
@@ -526,10 +610,56 @@ impl GatewayEngine {
         let reply = self
             .execute_chat_turn(key.as_ref(), &body, &req_model, &run_id, parent_id.as_deref(), agent_label.as_deref(), media_req)
             .await?;
-        if let (Some(ref sid), ChatReply::Json(ref reply_json)) = (&opts.session_id, &reply) {
-            self.append_session_turn(sid, &incoming_turns, reply_json);
+        let Some(sid) = session_key else { return Ok(reply) };
+        Ok(match reply {
+            ChatReply::Json(reply_json) => {
+                self.append_session_turn(&sid, &incoming_turns, &reply_json);
+                ChatReply::Json(reply_json)
+            }
+            // Tee the stream; once it ends, fold what the client received into one reply and save it.
+            ChatReply::Stream(frames) => {
+                let seen = Arc::new(parking_lot::Mutex::new(String::new()));
+                let (tee, tail_seen, engine) = (seen.clone(), seen, self.clone());
+                let frames = frames
+                    .map(move |item| {
+                        if let Ok(b) = &item {
+                            tee.lock().push_str(&String::from_utf8_lossy(b));
+                        }
+                        item
+                    })
+                    .chain(futures::stream::once(async move {
+                        let sse = std::mem::take(&mut *tail_seen.lock());
+                        let reply = aggregate_sse(&sse, (0, 0));
+                        if sse_error(&sse).is_none() && session_reply_has_content(&reply) {
+                            engine.append_session_turn(&sid, &incoming_turns, &reply);
+                        }
+                        Ok(Bytes::new())
+                    }))
+                    .boxed();
+                ChatReply::Stream(frames)
+            }
+        })
+    }
+
+    /// Avoids spawning every stdio MCP server on every chat request just to list its tools.
+    async fn mcp_tools_cached(&self, srv: &crate::store::McpServerRecord) -> (Vec<Value>, crate::mcp::McpToolIndex) {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+        let key = format!("{}@{}", srv.name, srv.updated_at);
+        if let Some((at, tools, index)) = self.mcp_tools.lock().get(&key) {
+            if at.elapsed() < TTL {
+                return (tools.clone(), index.clone());
+            }
         }
-        Ok(reply)
+        match crate::mcp::list_tools_indexed(&self.http_client, srv).await {
+            Ok((tools, index)) => {
+                self.mcp_tools.lock().insert(key, (std::time::Instant::now(), tools.clone(), index.clone()));
+                (tools, index)
+            }
+            Err(e) => {
+                tracing::warn!("[mcp] tools/list failed for '{}': {e}", srv.name);
+                Default::default()
+            }
+        }
     }
 
     fn resolve_mcp_servers(&self, requested: &[String]) -> Vec<crate::store::McpServerRecord> {
@@ -717,17 +847,29 @@ impl GatewayEngine {
         Err(gateway_err(502, format!("No connected AI provider could respond: {last_error}")))
     }
 
-    /// Launches a background subagent task whose live progress and final output are tracked in `self.activity`.
+    /// Starts a subagent in the background. It runs under `key` (budgets and limits apply), may use the
+    /// MCP servers in `opts.mcp_servers`, waits for a free slot (at most `MAX_CONCURRENT_SUBAGENTS` run at
+    /// once), and is saved to the store when it finishes so history survives restarts.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_subagent(
         &self,
+        key: Option<VirtualKeyRecord>,
         role: String,
         model: String,
         prompt: String,
         system: Option<String>,
+        parent_id: Option<String>,
         mut opts: ChatOptions,
     ) -> SubagentRun {
         let id = format!("sub_{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
-        let run = self.activity.create_run(id.clone(), opts.session_id.clone(), role.clone(), model.clone());
+        let run = self.activity.create_run_with(
+            id.clone(),
+            opts.session_id.clone(),
+            role.clone(),
+            model.clone(),
+            parent_id,
+            key.as_ref().map(|k| k.id.clone()),
+        );
         opts.run_id = Some(id.clone());
         opts.agent_label = Some(role);
 
@@ -739,22 +881,33 @@ impl GatewayEngine {
         let body = json!({ "model": model, "messages": msgs, "stream": false });
 
         let engine = self.clone();
-        tokio::spawn(async move {
-            match engine.chat_completions_with_options(None, body, opts).await {
+        let task_id = id.clone();
+        let handle = tokio::spawn(async move {
+            // Closed only if the hub is dropped; then just run unthrottled.
+            let _permit = engine.activity.slots.clone().acquire_owned().await.ok();
+            let result = engine.chat_completions_with_options(key, body, opts).await;
+            let finished = match result {
                 Ok(ChatReply::Json(v)) => {
                     let txt = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
-                    engine.activity.finish_run(&id, Some(txt), None);
+                    engine.activity.finish_run(&task_id, Some(txt), None)
                 }
-                Ok(ChatReply::Stream(_)) => {
-                    engine.activity.finish_run(&id, Some(String::new()), None);
-                }
+                Ok(ChatReply::Stream(_)) => engine.activity.finish_run(&task_id, Some(String::new()), None),
                 Err(e) => {
                     let msg = e.body["error"]["message"].as_str().unwrap_or("Subagent failed").to_string();
-                    engine.activity.finish_run(&id, None, Some(msg));
+                    engine.activity.finish_run(&task_id, None, Some(msg))
                 }
+            };
+            if let Some(r) = finished {
+                engine.store.save_subagent_run(&r);
             }
         });
+        self.activity.attach_task(&id, handle.abort_handle());
         run
+    }
+
+    /// Loads saved subagent history into the live hub; call once at startup.
+    pub fn restore_subagent_history(&self) {
+        self.activity.restore_runs(self.store.list_subagent_runs(200));
     }
 
     fn inject_skills(&self, body: &mut Value, skill_names: &[String]) {
@@ -817,6 +970,20 @@ fn json_reply_to_sse(reply: &Value) -> ChatReply {
     ChatReply::Stream(futures::stream::iter(vec![Ok(Bytes::from(chunk1)), Ok(Bytes::from(chunk2))]).boxed())
 }
 
+/// A failed or empty stream must not leave a dangling user turn in the session.
+fn session_reply_has_content(reply: &Value) -> bool {
+    let m = &reply["choices"][0]["message"];
+    m["content"].as_str().is_some_and(|c| !c.is_empty()) || m["tool_calls"].as_array().is_some_and(|t| !t.is_empty())
+}
+
+/// Storage id for a caller's session: `key:<key-id>:<sid>` for virtual keys, `local:<sid>` otherwise.
+pub fn session_storage_id(key: Option<&VirtualKeyRecord>, sid: &str) -> String {
+    match key {
+        Some(k) => format!("key:{}:{sid}", k.id),
+        None => format!("local:{sid}"),
+    }
+}
+
 fn gateway_err(status: u16, message: String) -> ChatError {
     ChatError { status, body: json!({ "error": { "message": message, "type": "gateway_error" } }) }
 }
@@ -834,6 +1001,133 @@ mod tests {
 
     fn ids(ts: &[Target]) -> Vec<String> {
         ts.iter().map(Target::public).collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_tools_list_is_cached_until_the_server_changes() {
+        let (e, dir) = engine();
+        let log = dir.path().join("spawns");
+        // Fake stdio MCP server: logs each spawn, answers initialize (id 1) and tools/list (id 2).
+        let script = format!(
+            "echo x >> {}; read a; echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}'; read b; read c; \
+             echo '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":[{{\"name\":\"ping\"}}]}}}}'",
+            log.display()
+        );
+        let mut srv = crate::store::McpServerRecord {
+            name: "fake".into(),
+            transport: "stdio".into(),
+            command: Some("sh".into()),
+            args: vec!["-c".into(), script],
+            env: Default::default(),
+            url: None,
+            headers: Default::default(),
+            enabled: true,
+            updated_at: 1.0,
+        };
+        let spawns = || std::fs::read_to_string(&log).unwrap_or_default().lines().count();
+
+        let (tools, _) = e.mcp_tools_cached(&srv).await;
+        assert_eq!(tools[0]["function"]["name"], "mcp__fake__ping");
+        e.mcp_tools_cached(&srv).await;
+        assert_eq!(spawns(), 1);
+
+        srv.updated_at = 2.0;
+        e.mcp_tools_cached(&srv).await;
+        assert_eq!(spawns(), 2);
+    }
+
+    #[test]
+    fn sessions_are_namespaced_per_key() {
+        let (e, _d) = engine();
+        let (ka, _) = e.store.create_virtual_key("a", None, None).unwrap();
+        let (kb, _) = e.store.create_virtual_key("b", None, None).unwrap();
+        let sa = session_storage_id(Some(&ka), "s1");
+        assert_ne!(sa, session_storage_id(Some(&kb), "s1"));
+        assert_ne!(sa, session_storage_id(None, "s1"));
+        e.store.save_session_messages(&sa, &[json!({"role":"user","content":"secret"})]).unwrap();
+        assert!(e.store.get_session_messages(&session_storage_id(Some(&kb), "s1")).is_empty());
+        assert!(e.store.get_session_messages(&session_storage_id(None, "s1")).is_empty());
+    }
+
+    mod subagents {
+        use super::*;
+
+        #[tokio::test]
+        async fn a_failed_run_is_saved_and_joinable() {
+            let (e, _d) = engine();
+            let run = e.spawn_subagent(None, "r".into(), "auto".into(), "hi".into(), None, Some("parent_1".into()), ChatOptions::default());
+            assert_eq!(run.parent_id.as_deref(), Some("parent_1"));
+            let done = e.activity.wait_run(&run.id, std::time::Duration::from_secs(5)).await.unwrap();
+            assert_eq!(done.phase, "failed"); // nothing is connected
+            assert!(e.store.list_subagent_runs(10).iter().any(|r| r.id == run.id));
+
+            // History comes back after a "restart".
+            let e2 = GatewayEngine::new(GatewayStore::new(_d.path()).unwrap());
+            e2.restore_subagent_history();
+            assert_eq!(e2.activity.get_run(&run.id).unwrap().phase, "failed");
+        }
+
+        #[tokio::test]
+        async fn cancelling_stops_a_queued_run() {
+            let (e, _d) = engine();
+            // Hold every slot so the run cannot start.
+            let _held = e.activity.slots.clone().acquire_many_owned(activity::MAX_CONCURRENT_SUBAGENTS as u32).await.unwrap();
+            let run = e.spawn_subagent(None, "r".into(), "auto".into(), "hi".into(), None, None, ChatOptions::default());
+            assert!(e.activity.cancel_run(&run.id));
+            assert_eq!(e.activity.get_run(&run.id).unwrap().phase, "cancelled");
+            assert!(!e.activity.cancel_run(&run.id), "second cancel is a no-op");
+        }
+
+        #[tokio::test]
+        async fn waiting_times_out_on_a_running_job() {
+            let (e, _d) = engine();
+            let _held = e.activity.slots.clone().acquire_many_owned(activity::MAX_CONCURRENT_SUBAGENTS as u32).await.unwrap();
+            let run = e.spawn_subagent(None, "r".into(), "auto".into(), "hi".into(), None, None, ChatOptions::default());
+            let r = e.activity.wait_run(&run.id, std::time::Duration::from_millis(100)).await.unwrap();
+            assert!(!r.is_finished());
+        }
+    }
+
+    #[test]
+    fn concurrent_slots_are_capped_and_freed_on_drop() {
+        let (e, _d) = engine();
+        let (mut k, _) = e.store.create_virtual_key("k", None, None).unwrap();
+        k.max_concurrent = Some(2);
+        let a = e.try_acquire_inflight(&k).unwrap();
+        let _b = e.try_acquire_inflight(&k).unwrap();
+        assert!(e.try_acquire_inflight(&k).is_none());
+        drop(a);
+        assert!(e.try_acquire_inflight(&k).is_some());
+        k.max_concurrent = None;
+        assert!((0..10).all(|_| e.try_acquire_inflight(&k).map(std::mem::forget).is_some()));
+    }
+
+    #[test]
+    fn rate_limit_counts_admitted_requests_not_attempts() {
+        let (e, _d) = engine();
+        let (k, _) = e.store.create_virtual_key("k", None, Some(2)).unwrap();
+        assert!(e.admit_rate(Some(&k)).is_ok());
+        // Failed upstream attempts are logged as usage rows but must not use up the limit.
+        for _ in 0..5 {
+            e.store.record_usage(&UsageEntry {
+                key_id: Some(&k.id),
+                key_name: Some("k"),
+                provider: Some("openai"),
+                model: Some("m"),
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_tokens: 0,
+                duration_ms: 1,
+                status: "error",
+                status_code: 429,
+                error: None,
+                streaming: false,
+            });
+        }
+        assert!(e.admit_rate(Some(&k)).is_ok());
+        assert_eq!(e.admit_rate(Some(&k)).unwrap_err().status, 429);
+        assert!(e.admit_rate(None).is_ok());
     }
 
     /// OpenAI (with one custom model) and DeepSeek connected by API key.

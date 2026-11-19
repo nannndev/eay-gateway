@@ -17,11 +17,46 @@ async fn handle_ui() -> Html<&'static str> {
     Html(include_str!("../ui.html"))
 }
 
-async fn admin_auth_middleware(req: Request, next: Next) -> Response {
-    let token = std::env::var("EAY_GATEWAY_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());
-    let Some(expected) = token else {
-        return next.run(req).await;
+/// Without an admin token, only loopback Host headers may reach admin routes: blocks DNS rebinding
+/// from a browser tab (which could otherwise register a stdio MCP server = arbitrary command).
+pub(crate) fn is_loopback_host(headers: &axum::http::HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return true; // HTTP/1.0 or in-process calls; browsers always send Host
     };
+    let name = if host.starts_with('[') { host.split(']').next().map(|h| &h[1..]) } else { host.split(':').next() };
+    matches!(name, Some("localhost" | "127.0.0.1" | "::1"))
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[derive(Debug, PartialEq)]
+enum AdminAccess {
+    Allow,
+    ReadOnly,
+    Unauthorized,
+    LoopbackOnly,
+}
+
+/// `full` can do everything; `read` can only GET (dashboards, monitors). With neither set,
+/// admin is loopback-only.
+fn admin_access(full: Option<&str>, read: Option<&str>, provided: Option<&str>, is_get: bool, loopback: bool) -> AdminAccess {
+    if full.is_none() && read.is_none() {
+        return if loopback { AdminAccess::Allow } else { AdminAccess::LoopbackOnly };
+    }
+    let is = |t: Option<&str>| matches!((provided, t), (Some(p), Some(t)) if constant_time_eq(p.as_bytes(), t.as_bytes()));
+    match (is(full), is(read)) {
+        (true, _) => AdminAccess::Allow,
+        (_, true) if is_get => AdminAccess::Allow,
+        (_, true) => AdminAccess::ReadOnly,
+        _ => AdminAccess::Unauthorized,
+    }
+}
+
+async fn admin_auth_middleware(req: Request, next: Next) -> Response {
+    let env_token = |name: &str| std::env::var(name).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let (full, read) = (env_token("EAY_GATEWAY_ADMIN_TOKEN"), env_token("EAY_GATEWAY_ADMIN_READ_TOKEN"));
     let provided = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -29,12 +64,48 @@ async fn admin_auth_middleware(req: Request, next: Next) -> Response {
         .and_then(|v| v.strip_prefix("Bearer ").or(v.strip_prefix("bearer ")))
         .or_else(|| req.headers().get("x-admin-token").and_then(|v| v.to_str().ok()))
         .map(str::trim);
-    if provided == Some(expected.trim()) {
-        next.run(req).await
-    } else {
-        (StatusCode::UNAUTHORIZED, Json(json!({ "detail": "Admin token required" }))).into_response()
-    }
+    let access =
+        admin_access(full.as_deref(), read.as_deref(), provided, req.method() == axum::http::Method::GET, is_loopback_host(req.headers()));
+    let (status, detail) = match access {
+        AdminAccess::Allow => return next.run(req).await,
+        AdminAccess::ReadOnly => (StatusCode::FORBIDDEN, "This admin token is read-only"),
+        AdminAccess::Unauthorized => (StatusCode::UNAUTHORIZED, "Admin token required"),
+        AdminAccess::LoopbackOnly => (StatusCode::FORBIDDEN, "Admin API is loopback-only; set --admin-token to allow other hosts"),
+    };
+    (status, Json(json!({ "detail": detail }))).into_response()
 }
+
+/// Enforces a virtual key's `max_concurrent`; the slot is released when the response body
+/// (including a long SSE stream) has been fully sent or dropped.
+async fn concurrency_middleware(axum::extract::State(engine): axum::extract::State<GatewayEngine>, req: Request, next: Next) -> Response {
+    let secret = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").or(v.strip_prefix("bearer ")))
+        .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()))
+        .map(str::trim)
+        .filter(|s| s.starts_with(eay_gateway_core::store::KEY_PREFIX));
+    let Some(key) = secret.and_then(|s| engine.store.find_virtual_key(s)).filter(|k| k.max_concurrent.is_some()) else {
+        return next.run(req).await;
+    };
+    let Some(guard) = engine.try_acquire_inflight(&key) else {
+        let msg = format!("Key '{}' already has {} requests in flight", key.name, key.max_concurrent.unwrap_or(0));
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "detail": msg, "error": { "message": msg, "type": "rate_limit" } })))
+            .into_response();
+    };
+    let resp = next.run(req).await;
+    let (parts, body) = resp.into_parts();
+    let stream = futures::StreamExt::map(body.into_data_stream(), move |chunk| {
+        let _ = &guard; // keep the slot until the stream ends
+        chunk
+    });
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
+/// Largest accepted request body: base64 media inflates ~33%, so this fits a 25 MB audio file
+/// or several large images in one chat request.
+pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Builds the Axum router for OpenAI-compatible inference and gateway admin APIs.
 pub fn gateway_router(engine: GatewayEngine) -> Router {
@@ -61,7 +132,10 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/v1/audio/translations", post(admin::handle_audio_translations))
         .route("/v1/models", get(admin::handle_list_models_v1))
         .route("/gateway/v1/models", get(admin::handle_list_models_v1))
-        .route("/gateway/health", get(admin::handle_health));
+        .route("/gateway/health", get(admin::handle_health))
+        .layer(middleware::from_fn_with_state(engine.clone(), concurrency_middleware))
+        // axum's 2 MB default rejects long agent contexts, inline images/PDFs and audio uploads.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES));
 
     let admin_routes = Router::new()
         // Accounts (OAuth)
@@ -111,9 +185,12 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/activity", get(admin::handle_activity_snapshot))
         .route("/gateway/admin/subagents", get(admin::handle_list_subagents).post(admin::handle_spawn_subagent))
         .route("/gateway/admin/subagents/:id", get(admin::handle_get_subagent).delete(admin::handle_delete_subagent))
+        .route("/gateway/admin/subagents/:id/cancel", post(admin::handle_cancel_subagent))
         // External MCP Connectors
         .route("/gateway/admin/mcp", get(admin::handle_list_mcp).post(admin::handle_save_mcp))
+        .route("/gateway/admin/mcp/import", post(admin::handle_import_mcp))
         .route("/gateway/admin/mcp/:name", delete(admin::handle_delete_mcp))
+        .route("/gateway/admin/mcp/:name/call", post(admin::handle_mcp_call))
         .route("/gateway/admin/mcp/:name/toggle", patch(admin::handle_toggle_mcp))
         .route("/gateway/admin/mcp/:name/tools", post(admin::handle_mcp_tools))
         // Models, Usage, Stats, Settings
@@ -125,4 +202,20 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .layer(middleware::from_fn(admin_auth_middleware));
 
     public.merge(admin_routes).with_state(engine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{admin_access, AdminAccess::*};
+
+    #[test]
+    fn admin_tokens_grant_full_or_read_only_access() {
+        assert_eq!(admin_access(None, None, None, false, true), Allow);
+        assert_eq!(admin_access(None, None, None, true, false), LoopbackOnly);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("full"), false, false), Allow);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("ro"), true, false), Allow);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("ro"), false, true), ReadOnly);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("nope"), true, true), Unauthorized);
+        assert_eq!(admin_access(None, Some("ro"), None, true, true), Unauthorized);
+    }
 }
