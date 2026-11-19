@@ -28,7 +28,7 @@ features:
     details: Mix subscription logins (Claude, ChatGPT/Codex, Copilot, Kimi, Cline...) with API keys (DeepSeek, OpenAI, Groq, NVIDIA...) under custom combos like auto/coding.
   - icon: ◈
     title: Real-time Quotas & Cost Tracking
-    details: Inspect remaining percentages, quota reset windows, active subscription tiers, and estimated cost per account through the admin API.
+    details: Per-account quota, reset windows and plan on /gateway/accounts/usage. All-time totals, daily charts and estimated cost on /gateway/stats, /gateway/analytics and /gateway/usage.
   - icon: ⚡
     title: Multi-Protocol & Multimodal
     details: Speaks /v1/chat/completions, /v1/messages (Anthropic native), /v1/responses, /v1/embeddings, images, and audio. Translates images, PDFs, video and thinking settings for every provider.
@@ -50,7 +50,7 @@ Point any client or coding assistant to `http://127.0.0.1:20129/v1` and use mode
 
 ```sh [cURL]
 # 1. Connect a provider
-curl -X POST http://127.0.0.1:20129/gateway/admin/providers/deepseek/connect \
+curl -X POST http://127.0.0.1:20129/gateway/providers/deepseek/connect \
   -H 'content-type: application/json' \
   -d '{"api_key":"sk-..."}'
 

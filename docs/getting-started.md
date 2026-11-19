@@ -49,7 +49,7 @@ Homebrew, use `brew services` instead.
 ## Connect an API key
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/providers/openai/connect \
+curl -X POST http://127.0.0.1:20129/gateway/providers/openai/connect \
   -H 'content-type: application/json' -d '{"api_key":"sk-..."}'
 ```
 
@@ -57,12 +57,12 @@ The gateway checks the key against the provider first and fetches its model list
 need a base URL, for example Azure OpenAI or Cloudflare:
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/providers/azure-openai/connect \
+curl -X POST http://127.0.0.1:20129/gateway/providers/azure-openai/connect \
   -H 'content-type: application/json' \
   -d '{"api_key":"...","base_url":"https://<resource>.openai.azure.com/openai/v1"}'
 ```
 
-Add more keys for the same provider with `POST /gateway/admin/providers/<id>/keys`. They rotate
+Add more keys for the same provider with `POST /gateway/providers/<id>/keys`. They rotate
 together (see [Routing](routing.md)).
 
 ## Log in with a subscription
@@ -70,13 +70,13 @@ together (see [Routing](routing.md)).
 Subscription providers use the provider's own login:
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/accounts/claude/start -H 'content-type: application/json' -d '{}'
+curl -X POST http://127.0.0.1:20129/gateway/accounts/claude/start -H 'content-type: application/json' -d '{}'
 ```
 
 - **Browser login** (`"kind":"redirect"`): open `auth_url`. The gateway listens on a local
   callback port and finishes the login by itself.
 - **Device login** (`"kind":"device"`): open `verification_uri` and enter `user_code`, then poll
-  `POST /gateway/admin/accounts/<provider>/poll` with `{"session_id": "..."}` until it returns
+  `POST /gateway/accounts/<provider>/poll` with `{"session_id": "..."}` until it returns
   `{"status":"done"}`.
 
 Some logins can be imported from a tool already signed in on this machine: the Codex CLI,
@@ -100,11 +100,11 @@ Or use `compose.yaml` from the repo with `EAY_GATEWAY_ADMIN_TOKEN` in a `.env` f
 What is different in a container:
 
 - **Admin token is required.** Nothing inside a container looks like localhost, so
-  `/gateway/admin/*` refuses requests without `EAY_GATEWAY_ADMIN_TOKEN`. Send it as
+  management routes (`/gateway/accounts`, `/gateway/keys`, and the rest) refuse requests without `EAY_GATEWAY_ADMIN_TOKEN`. Send it as
   `Authorization: Bearer …` or `x-admin-token`.
 - **Browser logins need one extra step.** The login page sends you back to `http://localhost:<port>`
   on your computer, not into the container. When the page fails to load, copy that URL from the
-  address bar and finish with `POST /gateway/admin/accounts/<provider>/complete`
+  address bar and finish with `POST /gateway/accounts/<provider>/complete`
   (`{"session_id":"…","callback":"<the URL>"}`), or paste it into eay-console. Device logins
   (enter a code on a website) work as usual.
 - **Local MCP servers don't run.** The image has no Node or Python, so `npx`/`uvx` servers fail.

@@ -154,6 +154,8 @@ impl GatewayStore {
         let _ = conn.execute("ALTER TABLE providers ADD COLUMN models_synced_at REAL", []);
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN cached_tokens INTEGER", []);
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN cost REAL", []);
+        let _ = conn.execute("ALTER TABLE usage ADD COLUMN agent TEXT", []);
+        let _ = conn.execute("ALTER TABLE usage ADD COLUMN team TEXT", []);
         migrate_named_teams(&conn)?;
         Ok(())
     }

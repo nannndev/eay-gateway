@@ -17,6 +17,10 @@ pub struct UsageEntry<'a> {
     pub status_code: i64,
     pub error: Option<&'a str>,
     pub streaming: bool,
+    /// Saved agent that spoke, or a worker's role when it has no profile. Empty for a raw model call.
+    pub agent: Option<&'a str>,
+    /// Roster id (`tm_…`) this request was bound to, including a worker the lead started.
+    pub team: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

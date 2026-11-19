@@ -142,7 +142,7 @@ Add these headers to any request; SDKs let you set default headers on the client
 | `x-eay-mcp: *` (or server names) | Gives the model your MCP tools and runs them for it |
 | `x-eay-redact: true` | Strips API keys and tokens from messages before they leave |
 | `x-eay-max-context-chars: 200000` | Drops the oldest messages beyond this size |
-| `x-eay-run-id: <id>` | Follow this request live on `GET /gateway/admin/events` |
+| `x-eay-run-id: <id>` | Follow this request live on `GET /gateway/events` |
 
 ```python
 client = OpenAI(
@@ -178,7 +178,7 @@ share one gateway; follow [Sharing one gateway between apps](configuration.md#sh
 1. `GET http://127.0.0.1:20129/health`. If it answers with `"service":"eay-gateway"`, use it.
 2. Otherwise start the bundled binary with `--idle-exit 30` and don't stop it when your app quits.
 
-Call the admin API (`/gateway/admin/*`) from your app's native side (Rust, Swift, C#, Node main
+Call management routes (`/gateway/accounts`, `/gateway/agents`, and the rest) from your app's native side (Rust, Swift, C#, Node main
 process), not from a webview: requests without a browser `Origin` are not subject to the gateway's
 browser rules. OpenNotchi works this way.
 
@@ -201,7 +201,7 @@ tools for you (`x-eay-mcp`, subagents), limit them with a [tool policy](api.md#t
 the agent or key, for example a read-only reviewer:
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' -d '{
+curl -X POST http://127.0.0.1:20129/gateway/agents -H 'content-type: application/json' -d '{
   "name": "reviewer", "model": "auto", "personality": "Review code, never change it.",
   "tool_policy": { "mode": "read_only" }
 }'
@@ -212,9 +212,9 @@ Let a model split work by itself: give its agent a subagent budget, and it gets 
 once:
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:20129/gateway/agents -H 'content-type: application/json' \
   -d '{"name":"reviewer","model":"auto","description":"Reviews code for bugs","tool_policy":{"mode":"read_only"}}'
-curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:20129/gateway/agents -H 'content-type: application/json' \
   -d '{"name":"tester","model":"auto","description":"Writes unit tests"}'
 ```
 
@@ -229,7 +229,7 @@ renaming the team keeps the id, and the same id can back two sessions. Each sess
 messages. Forgetting a session does not delete the roster.
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/teams -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:20129/gateway/teams -H 'content-type: application/json' \
   -d '{"name":"app","lead":"reviewer","members":["reviewer","tester"]}'
 # the response id looks like tm_ab12cd34ef56 — send that, not the label
 curl http://127.0.0.1:20129/v1/chat/completions -H 'content-type: application/json' \
@@ -241,32 +241,32 @@ Give a specialist its tools with
 `mcp` (used when the request comes from this machine):
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:20129/gateway/agents -H 'content-type: application/json' \
   -d '{"name":"tester","model":"auto","description":"Writes unit tests","mcp":["filesystem"]}'
 ```
 
 Add approval so a team cannot change anything without you:
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' -d '{
+curl -X POST http://127.0.0.1:20129/gateway/agents -H 'content-type: application/json' -d '{
   "name": "lead", "model": "auto",
   "tool_policy": { "max_subagents": 3, "approval": "manual_for_writes" }
 }'
 ```
 
-Pending approvals show up at `GET /gateway/admin/approvals` and in eay-console's Activity tab.
+Pending approvals show up at `GET /gateway/approvals` and in eay-console's Activity tab.
 
 The admin API runs background agents for you:
 
 ```sh
 # start a child agent with MCP tools, under a key's budget
-curl -X POST http://127.0.0.1:20129/gateway/admin/subagents -H 'content-type: application/json' -d '{
+curl -X POST http://127.0.0.1:20129/gateway/subagents -H 'content-type: application/json' -d '{
   "role": "Reviewer", "model": "auto", "prompt": "Review src/lib.rs",
   "mcp": ["filesystem"], "api_key": "gw-sk-…", "parent_id": "my-run-1"
 }'
 
 # wait up to 2 minutes for it to finish
-curl 'http://127.0.0.1:20129/gateway/admin/subagents/sub_…?wait=120'
+curl 'http://127.0.0.1:20129/gateway/subagents/sub_…?wait=120'
 ```
 
 See [HTTP API](api.md) for cancel, limits and the live event stream.

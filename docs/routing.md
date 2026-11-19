@@ -33,7 +33,7 @@ provider id, so clients can group the list.
 A combo is a named, ordered list of targets. Each entry is a model or `<alias>/auto`:
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/combos -H 'content-type: application/json' \
+curl -X POST http://127.0.0.1:20129/gateway/combos -H 'content-type: application/json' \
   -d '{"name":"coding","targets":["cx/gpt-5.5","cc/auto","ds/deepseek-chat"]}'
 ```
 
@@ -76,7 +76,7 @@ a cooldown.
 
 ## Settings
 
-`POST /gateway/admin/settings` with any of:
+`POST /gateway/settings` with any of:
 
 | Field | Values | Default |
 |---|---|---|
@@ -86,4 +86,4 @@ a cooldown.
 | `auto_models_per_provider` | 1–10 | 2 |
 | `cooldown_secs` | 0–3600 | 60 |
 
-`GET /gateway/admin/settings` also returns `auto_order`: the provider order `auto` uses right now.
+`GET /gateway/settings` also returns `auto_order`: the provider order `auto` uses right now.

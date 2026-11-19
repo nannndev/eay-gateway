@@ -341,7 +341,7 @@ done"#
     );
     let (st, body) = post_raw(
         &gw.app,
-        "/gateway/admin/mcp",
+        "/gateway/mcp",
         json!({ "name": "longtools", "transport": "stdio", "command": "sh", "args": ["-c", script] }),
         &[],
     )
@@ -397,7 +397,7 @@ async fn start_http_mcp() -> (String, Arc<Mutex<u32>>) {
 async fn http_mcp_reuses_its_session_and_passes_images_to_the_model() {
     let gw = gateway(false).await;
     let (url, inits) = start_http_mcp().await;
-    let (st, body) = post_raw(&gw.app, "/gateway/admin/mcp", json!({ "name": "browser", "transport": "http", "url": url }), &[]).await;
+    let (st, body) = post_raw(&gw.app, "/gateway/mcp", json!({ "name": "browser", "transport": "http", "url": url }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{body}");
 
     let (st, body) =
@@ -414,7 +414,7 @@ async fn http_mcp_reuses_its_session_and_passes_images_to_the_model() {
     assert_eq!(img.unwrap()["image_url"]["url"], "data:image/png;base64,iVBORw0KGgo=");
 
     // A direct tool call reuses the same session too.
-    let (st, _) = post_raw(&gw.app, "/gateway/admin/mcp/browser/call", json!({ "tool": "screenshot" }), &[]).await;
+    let (st, _) = post_raw(&gw.app, "/gateway/mcp/browser/call", json!({ "tool": "screenshot" }), &[]).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(*inits.lock().unwrap(), 1);
 }
@@ -455,7 +455,7 @@ async fn tool_policies_limit_gateway_run_mcp_tools() {
     let gw = gateway(false).await;
     let (st, body) = post_raw(
         &gw.app,
-        "/gateway/admin/mcp",
+        "/gateway/mcp",
         json!({ "name": "files", "transport": "stdio", "command": "sh", "args": ["-c", two_tool_mcp_script()] }),
         &[],
     )
@@ -469,20 +469,15 @@ async fn tool_policies_limit_gateway_run_mcp_tools() {
     };
 
     // An agent in read-only mode only sees tools the server marks read-only.
-    let (st, body) = post_raw(
-        &gw.app,
-        "/gateway/admin/agents",
-        json!({ "name": "reviewer", "model": "auto", "tool_policy": { "mode": "read_only" } }),
-        &[],
-    )
-    .await;
+    let (st, body) =
+        post_raw(&gw.app, "/gateway/agents", json!({ "name": "reviewer", "model": "auto", "tool_policy": { "mode": "read_only" } }), &[])
+            .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/reviewer", "messages": hello() }), &[("x-eay-mcp", "files")]).await;
     assert_eq!(offered(&gw.seen), ["mcp__files__read_file"]);
 
     // A key that denies read_file, used with no agent, sees only write_file.
-    let (st, created) =
-        post_raw(&gw.app, "/gateway/admin/keys", json!({ "name": "ci", "tool_policy": { "deny": ["read_file"] } }), &[]).await;
+    let (st, created) = post_raw(&gw.app, "/gateway/keys", json!({ "name": "ci", "tool_policy": { "deny": ["read_file"] } }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{created}");
     let secret = serde_json::from_str::<Value>(&created).unwrap()["key"]["key"].as_str().unwrap().to_string();
     let bearer = format!("Bearer {secret}");
@@ -506,9 +501,9 @@ async fn tool_policies_limit_gateway_run_mcp_tools() {
     assert!(offered(&gw.seen).is_empty());
 
     // Unknown modes are rejected, and no key is left behind.
-    let (st, _) = post_raw(&gw.app, "/gateway/admin/keys", json!({ "name": "bad", "tool_policy": { "mode": "yolo" } }), &[]).await;
+    let (st, _) = post_raw(&gw.app, "/gateway/keys", json!({ "name": "bad", "tool_policy": { "mode": "yolo" } }), &[]).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let req = Request::builder().uri("/gateway/admin/keys").body(Body::empty()).unwrap();
+    let req = Request::builder().uri("/gateway/keys").body(Body::empty()).unwrap();
     let resp = gw.app.clone().oneshot(req).await.unwrap();
     let keys: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let names: Vec<&str> = keys["keys"].as_array().unwrap().iter().filter_map(|k| k["name"].as_str()).collect();
@@ -525,39 +520,38 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
 async fn sessions_can_be_listed_and_read() {
     let gw = gateway(false).await;
     post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-session-id", "chat-1")]).await;
-    let (st, list) = get_json(&gw.app, "/gateway/admin/sessions").await;
+    let (st, list) = get_json(&gw.app, "/gateway/sessions").await;
     assert_eq!(st, StatusCode::OK);
     let s = &list["sessions"][0];
     assert_eq!(s["session"], "chat-1");
     assert_eq!(s["owner"], "local");
     assert_eq!(s["messages"], 2);
 
-    let (st, one) = get_json(&gw.app, &format!("/gateway/admin/sessions/{}", s["id"].as_str().unwrap())).await;
+    let (st, one) = get_json(&gw.app, &format!("/gateway/sessions/{}", s["id"].as_str().unwrap())).await;
     assert_eq!(st, StatusCode::OK, "{one}");
     assert_eq!(one["messages"][1]["content"], "pong");
     // A bare session name finds the local session too.
-    assert_eq!(get_json(&gw.app, "/gateway/admin/sessions/chat-1").await.0, StatusCode::OK);
-    assert_eq!(get_json(&gw.app, "/gateway/admin/sessions/nope").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get_json(&gw.app, "/gateway/sessions/chat-1").await.0, StatusCode::OK);
+    assert_eq!(get_json(&gw.app, "/gateway/sessions/nope").await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn a_model_can_delegate_to_a_subagent_when_its_agent_allows_it() {
     let gw = gateway(false).await;
     // Without max_subagents the model is not offered the delegate tool.
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "plain", "model": "auto" }), &[]).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "plain", "model": "auto" }), &[]).await;
     post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/plain", "messages": hello() }), &[]).await;
     assert!(gw.seen.lock().unwrap().last().unwrap().get("tools").is_none());
 
     let (st, body) =
-        post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[])
-            .await;
+        post_raw(&gw.app, "/gateway/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     let (st, body) = post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/lead", "messages": hello() }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     // The lead's final answer echoes the subagent's result, which came back as the tool output.
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"], "tool said: [Helper]\nsub done");
 
-    let (_, subs) = get_json(&gw.app, "/gateway/admin/subagents").await;
+    let (_, subs) = get_json(&gw.app, "/gateway/subagents").await;
     let list = subs["subagents"].as_array().unwrap();
     let sub = list.iter().find(|s| s["role"] == "Helper").expect("helper run");
     assert_eq!(sub["phase"], "completed");
@@ -573,8 +567,7 @@ async fn a_model_can_delegate_to_a_subagent_when_its_agent_allows_it() {
 async fn delegation_stops_at_the_depth_limit() {
     let gw = gateway(false).await;
     // A model that always delegates: each level starts another, until the gateway stops offering it.
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[])
-        .await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[]).await;
     let (st, _) = post_raw(
         &gw.app,
         "/v1/chat/completions",
@@ -583,7 +576,7 @@ async fn delegation_stops_at_the_depth_limit() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    let (_, subs) = get_json(&gw.app, "/gateway/admin/subagents").await;
+    let (_, subs) = get_json(&gw.app, "/gateway/subagents").await;
     // The lead request plus one worker per level. The fourth level is not offered delegate.
     assert_eq!(subs["subagents"].as_array().unwrap().len(), 4, "lead + MAX_DELEGATE_DEPTH workers, no more");
 }
@@ -594,14 +587,14 @@ async fn manual_approval_holds_a_tool_until_someone_answers() {
     let gw = gateway(false).await;
     post_raw(
         &gw.app,
-        "/gateway/admin/mcp",
+        "/gateway/mcp",
         json!({ "name": "files", "transport": "stdio", "command": "sh", "args": ["-c", two_tool_mcp_script()] }),
         &[],
     )
     .await;
     post_raw(
         &gw.app,
-        "/gateway/admin/agents",
+        "/gateway/agents",
         json!({ "name": "careful", "model": "auto", "tool_policy": { "approval": "manual", "allow": ["files/write_file"] } }),
         &[],
     )
@@ -616,7 +609,7 @@ async fn manual_approval_holds_a_tool_until_someone_answers() {
         // Wait for the tool call to show up as pending, then answer it.
         let mut id = None;
         for _ in 0..50 {
-            let (_, list) = get_json(&gw.app, "/gateway/admin/approvals").await;
+            let (_, list) = get_json(&gw.app, "/gateway/approvals").await;
             if let Some(a) = list["approvals"].as_array().and_then(|a| a.first()) {
                 assert_eq!(a["tool"], "mcp__files__write_file");
                 id = a["id"].as_str().map(String::from);
@@ -625,26 +618,22 @@ async fn manual_approval_holds_a_tool_until_someone_answers() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let id = id.expect("tool call never became pending");
-        let (st, _) = post_raw(&gw.app, &format!("/gateway/admin/approvals/{id}"), json!({ "approve": approve }), &[]).await;
+        let (st, _) = post_raw(&gw.app, &format!("/gateway/approvals/{id}"), json!({ "approve": approve }), &[]).await;
         assert_eq!(st, StatusCode::OK);
         let (st, body) = req.await.unwrap();
         assert_eq!(st, StatusCode::OK, "{body}");
         let answer = serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"].as_str().unwrap().to_string();
         assert!(answer.contains(expected), "approve={approve}: {answer}");
         // Answering twice is refused.
-        assert_eq!(
-            post_raw(&gw.app, &format!("/gateway/admin/approvals/{id}"), json!({ "approve": true }), &[]).await.0,
-            StatusCode::NOT_FOUND
-        );
+        assert_eq!(post_raw(&gw.app, &format!("/gateway/approvals/{id}"), json!({ "approve": true }), &[]).await.0, StatusCode::NOT_FOUND);
     }
 }
 
 #[tokio::test]
 async fn a_lead_runs_its_subagents_in_parallel_and_can_use_saved_agents() {
     let gw = gateway(false).await;
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[])
-        .await;
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "tester", "model": "auto", "description": "Writes tests" }), &[]).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[]).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "tester", "model": "auto", "description": "Writes tests" }), &[]).await;
 
     let (st, body) = post_raw(
         &gw.app,
@@ -700,7 +689,7 @@ async fn a_lead_runs_its_subagents_in_parallel_and_can_use_saved_agents() {
     }
 
     // The lead request is the root; the three workers sit under it, in start order.
-    let (_, tree) = get_json(&gw.app, "/gateway/admin/subagents/tree").await;
+    let (_, tree) = get_json(&gw.app, "/gateway/subagents/tree").await;
     let roots = tree["tree"].as_array().unwrap();
     assert_eq!(roots.len(), 1, "{tree}");
     assert_eq!(roots[0]["role"], "lead");
@@ -714,8 +703,7 @@ async fn a_lead_runs_its_subagents_in_parallel_and_can_use_saved_agents() {
 #[tokio::test]
 async fn cancelling_the_lead_skips_its_wrap_up_turn() {
     let gw = gateway(false).await;
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[])
-        .await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[]).await;
     let app = gw.app.clone();
     let pending = tokio::spawn(async move {
         post_raw(&app, "/v1/chat/completions", json!({ "model": "agent/lead", "messages": [{ "role": "user", "content": "CANCEL" }] }), &[])
@@ -723,7 +711,7 @@ async fn cancelling_the_lead_skips_its_wrap_up_turn() {
     });
     let mut root = None;
     for _ in 0..40 {
-        let (_, tree) = get_json(&gw.app, "/gateway/admin/subagents/tree").await;
+        let (_, tree) = get_json(&gw.app, "/gateway/subagents/tree").await;
         if let Some(id) = tree["tree"].as_array().and_then(|t| t.first()).and_then(|r| r["id"].as_str()) {
             root = Some(id.to_string());
             break;
@@ -731,7 +719,7 @@ async fn cancelling_the_lead_skips_its_wrap_up_turn() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     let root = root.expect("the lead run was never opened");
-    let (st, _) = post_raw(&gw.app, &format!("/gateway/admin/subagents/{root}/cancel"), json!({}), &[]).await;
+    let (st, _) = post_raw(&gw.app, &format!("/gateway/subagents/{root}/cancel"), json!({}), &[]).await;
     assert_eq!(st, StatusCode::OK);
     let (st, body) = pending.await.unwrap();
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
@@ -743,11 +731,10 @@ async fn cancelling_the_lead_skips_its_wrap_up_turn() {
 #[tokio::test]
 async fn the_tree_nests_children_under_their_parent_run() {
     let gw = gateway(false).await;
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[])
-        .await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[]).await;
     post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/loop", "messages": [{ "role": "user", "content": "LOOP" }] }), &[])
         .await;
-    let (_, tree) = get_json(&gw.app, "/gateway/admin/subagents/tree").await;
+    let (_, tree) = get_json(&gw.app, "/gateway/subagents/tree").await;
     let roots = tree["tree"].as_array().unwrap();
     assert_eq!(roots.len(), 1, "{tree}");
     assert_eq!(roots[0]["role"], "loop");

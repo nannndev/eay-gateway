@@ -38,7 +38,7 @@ mod admin_host_guard {
 
     async fn status_with_host(host: &str) -> StatusCode {
         let (app, _dir) = app();
-        let req = Request::builder().uri("/gateway/admin/combos").header("host", host).body(Body::empty()).unwrap();
+        let req = Request::builder().uri("/gateway/combos").header("host", host).body(Body::empty()).unwrap();
         app.oneshot(req).await.unwrap().status()
     }
 
@@ -65,24 +65,24 @@ mod mcp_import {
             "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "~"] },
             "linear": { "url": "https://mcp.linear.app/mcp" }
         }});
-        let (st, body) = call(&app, "POST", "/gateway/admin/mcp/import", Some(cfg), None).await;
+        let (st, body) = call(&app, "POST", "/gateway/mcp/import", Some(cfg), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["imported"].as_array().unwrap().len(), 2);
-        let (_, list) = call(&app, "GET", "/gateway/admin/mcp", None, None).await;
+        let (_, list) = call(&app, "GET", "/gateway/mcp", None, None).await;
         assert_eq!(list["mcp_servers"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn rejects_a_config_without_servers() {
         let (app, _dir) = app();
-        let (st, _) = call(&app, "POST", "/gateway/admin/mcp/import", Some(json!({ "foo": 1 })), None).await;
+        let (st, _) = call(&app, "POST", "/gateway/mcp/import", Some(json!({ "foo": 1 })), None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn calling_a_tool_on_an_unknown_server_is_404() {
         let (app, _dir) = app();
-        let (st, _) = call(&app, "POST", "/gateway/admin/mcp/nope/call", Some(json!({ "tool": "x" })), None).await;
+        let (st, _) = call(&app, "POST", "/gateway/mcp/nope/call", Some(json!({ "tool": "x" })), None).await;
         assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }
@@ -95,7 +95,7 @@ mod key_concurrency {
         let dir = tempfile::tempdir().unwrap();
         let engine = GatewayEngine::new(GatewayStore::new(dir.path()).unwrap());
         let app = gateway_router(engine.clone());
-        let (_, created) = call(&app, "POST", "/gateway/admin/keys", Some(json!({ "name": "agent", "max_concurrent": 1 })), None).await;
+        let (_, created) = call(&app, "POST", "/gateway/keys", Some(json!({ "name": "agent", "max_concurrent": 1 })), None).await;
         let secret = created["key"]["key"].as_str().unwrap().to_string();
         let rec = engine.store.find_virtual_key(&secret).unwrap();
         let _busy = engine.try_acquire_inflight(&rec).unwrap(); // simulate one request in flight
@@ -154,10 +154,10 @@ mod chat_completions {
     #[tokio::test]
     async fn rejects_a_disabled_gateway_key() {
         let (app, _d) = app();
-        let (_, created) = call(&app, "POST", "/gateway/admin/keys", Some(json!({ "name": "ci" })), None).await;
+        let (_, created) = call(&app, "POST", "/gateway/keys", Some(json!({ "name": "ci" })), None).await;
         let id = created["key"]["id"].as_str().unwrap().to_string();
         let secret = created["key"]["key"].as_str().unwrap().to_string();
-        call(&app, "PATCH", &format!("/gateway/admin/keys/{id}/toggle"), None, None).await;
+        call(&app, "PATCH", &format!("/gateway/keys/{id}/toggle"), None, None).await;
         assert_eq!(call(&app, "POST", CHAT, hi(), Some(&secret)).await.0, StatusCode::UNAUTHORIZED);
     }
 
@@ -178,7 +178,7 @@ mod chat_completions {
     async fn enforces_a_keys_allowed_providers() {
         let (app, _d) = app();
         let body = json!({ "name": "ci", "allowed_providers": ["deepseek"] });
-        let (_, created) = call(&app, "POST", "/gateway/admin/keys", Some(body), None).await;
+        let (_, created) = call(&app, "POST", "/gateway/keys", Some(body), None).await;
         let secret = created["key"]["key"].as_str().unwrap().to_string();
         let req = Some(json!({ "model": "oa/gpt-4o", "messages": [{ "role": "user", "content": "hi" }] }));
         assert_eq!(call(&app, "POST", CHAT, req, Some(&secret)).await.0, StatusCode::FORBIDDEN);
@@ -191,7 +191,7 @@ mod settings {
     #[tokio::test]
     async fn rejects_an_unknown_routing_strategy() {
         let (app, _d) = app();
-        let (status, _) = call(&app, "POST", "/gateway/admin/settings", Some(json!({ "routing_strategy": "yolo" })), None).await;
+        let (status, _) = call(&app, "POST", "/gateway/settings", Some(json!({ "routing_strategy": "yolo" })), None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
@@ -199,7 +199,7 @@ mod settings {
     async fn saves_the_provider_priority() {
         let (app, _d) = app();
         let body = json!({ "provider_priority": ["deepseek", "openai"] });
-        let (_, saved) = call(&app, "POST", "/gateway/admin/settings", Some(body), None).await;
+        let (_, saved) = call(&app, "POST", "/gateway/settings", Some(body), None).await;
         assert_eq!(saved["settings"]["provider_priority"], json!(["deepseek", "openai"]));
     }
 }
@@ -210,14 +210,14 @@ mod combos {
     #[tokio::test]
     async fn rejects_a_name_with_a_slash() {
         let (app, _d) = app();
-        let (status, _) = call(&app, "POST", "/gateway/admin/combos", Some(json!({ "name": "a/b", "targets": ["x"] })), None).await;
+        let (status, _) = call(&app, "POST", "/gateway/combos", Some(json!({ "name": "a/b", "targets": ["x"] })), None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn a_saved_combo_shows_up_as_an_auto_model() {
         let (app, _d) = app();
-        call(&app, "POST", "/gateway/admin/combos", Some(json!({ "name": "mix", "targets": ["oa/gpt-4o"] })), None).await;
+        call(&app, "POST", "/gateway/combos", Some(json!({ "name": "mix", "targets": ["oa/gpt-4o"] })), None).await;
         let (_, models) = call(&app, "GET", "/v1/models", None, None).await;
         let ids: Vec<&str> = models["data"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
         assert!(ids.contains(&"auto/mix"), "{ids:?}");
@@ -230,7 +230,7 @@ mod models {
     #[tokio::test]
     async fn lists_only_connected_providers() {
         let (app, _d) = app();
-        call(&app, "POST", "/gateway/admin/providers/deepseek/key", Some(json!({ "api_key": "sk" })), None).await;
+        call(&app, "POST", "/gateway/providers/deepseek/key", Some(json!({ "api_key": "sk" })), None).await;
         let (_, models) = call(&app, "GET", "/v1/models", None, None).await;
         let owners: std::collections::HashSet<&str> =
             models["data"].as_array().unwrap().iter().filter_map(|m| m["owned_by"].as_str()).collect();
@@ -244,14 +244,14 @@ mod providers {
     #[tokio::test]
     async fn connecting_azure_without_a_base_url_is_refused() {
         let (app, _d) = app();
-        let (status, _) = call(&app, "POST", "/gateway/admin/providers/azure-openai/connect", Some(json!({ "api_key": "k" })), None).await;
+        let (status, _) = call(&app, "POST", "/gateway/providers/azure-openai/connect", Some(json!({ "api_key": "k" })), None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn importing_for_a_provider_without_a_local_login_is_refused() {
         let (app, _d) = app();
-        assert_eq!(call(&app, "POST", "/gateway/admin/providers/openai/import", None, None).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call(&app, "POST", "/gateway/providers/openai/import", None, None).await.0, StatusCode::BAD_REQUEST);
     }
 }
 
@@ -308,7 +308,7 @@ mod skills {
         let (st, created) = call(
             &app,
             "POST",
-            "/gateway/admin/skills",
+            "/gateway/skills",
             Some(json!({ "name": "rust-expert", "description": "Rust", "prompt": "Write clean Rust." })),
             None,
         )
@@ -316,15 +316,15 @@ mod skills {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(created["skill"]["enabled"], true);
 
-        let (st, list) = call(&app, "GET", "/gateway/admin/skills", None, None).await;
+        let (st, list) = call(&app, "GET", "/gateway/skills", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(list["skills"].as_array().unwrap().len(), 1);
 
-        let (st, toggled) = call(&app, "PATCH", "/gateway/admin/skills/rust-expert/toggle", None, None).await;
+        let (st, toggled) = call(&app, "PATCH", "/gateway/skills/rust-expert/toggle", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(toggled["skill"]["enabled"], false);
 
-        let (st, del) = call(&app, "DELETE", "/gateway/admin/skills/rust-expert", None, None).await;
+        let (st, del) = call(&app, "DELETE", "/gateway/skills/rust-expert", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(del["status"], "deleted");
     }
@@ -332,7 +332,7 @@ mod skills {
     #[tokio::test]
     async fn rejects_invalid_skill_name() {
         let (app, _d) = app();
-        let (st, _) = call(&app, "POST", "/gateway/admin/skills", Some(json!({ "name": "bad+name", "prompt": "hi" })), None).await;
+        let (st, _) = call(&app, "POST", "/gateway/skills", Some(json!({ "name": "bad+name", "prompt": "hi" })), None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -340,7 +340,7 @@ mod skills {
     async fn virtual_key_can_bind_default_skills() {
         let (app, _d) = app();
         let (st, created) =
-            call(&app, "POST", "/gateway/admin/keys", Some(json!({ "name": "proj-a", "default_skills": ["rust-expert"] })), None).await;
+            call(&app, "POST", "/gateway/keys", Some(json!({ "name": "proj-a", "default_skills": ["rust-expert"] })), None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(created["key"]["default_skills"], json!(["rust-expert"]));
     }
@@ -378,14 +378,9 @@ mod virtual_key_budgets {
     #[tokio::test]
     async fn enforces_max_tokens_budget_and_max_cost_usd() {
         let (app, _d) = app();
-        let (st, created) = call(
-            &app,
-            "POST",
-            "/gateway/admin/keys",
-            Some(json!({ "name": "budgeted", "max_tokens_budget": 100, "max_cost_usd": 0.5 })),
-            None,
-        )
-        .await;
+        let (st, created) =
+            call(&app, "POST", "/gateway/keys", Some(json!({ "name": "budgeted", "max_tokens_budget": 100, "max_cost_usd": 0.5 })), None)
+                .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(created["key"]["max_tokens_budget"], 100);
         assert_eq!(created["key"]["max_cost_usd"], 0.5);
@@ -419,7 +414,7 @@ mod root_and_cors {
         let pre = send(
             &app,
             "OPTIONS",
-            "/gateway/admin/combos",
+            "/gateway/combos",
             &[
                 ("origin", origin),
                 ("access-control-request-method", "POST"),
@@ -434,7 +429,7 @@ mod root_and_cors {
         assert_eq!(h["access-control-allow-headers"], "content-type,x-admin-token");
         assert_eq!(h["access-control-allow-private-network"], "true");
 
-        let get = send(&app, "GET", "/gateway/admin/combos", &[("origin", origin)]).await;
+        let get = send(&app, "GET", "/gateway/combos", &[("origin", origin)]).await;
         assert_eq!(get.status(), StatusCode::OK);
         assert_eq!(get.headers()["access-control-allow-origin"], origin);
     }
@@ -442,7 +437,7 @@ mod root_and_cors {
     #[tokio::test]
     async fn other_web_pages_are_refused_even_for_simple_requests() {
         let (app, _d) = app();
-        for (method, uri) in [("OPTIONS", "/gateway/admin/mcp"), ("POST", "/v1/audio/transcriptions"), ("GET", "/gateway/admin/keys")] {
+        for (method, uri) in [("OPTIONS", "/gateway/mcp"), ("POST", "/v1/audio/transcriptions"), ("GET", "/gateway/keys")] {
             let resp = send(&app, method, uri, &[("origin", "https://evil.example")]).await;
             assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {uri}");
             assert!(resp.headers().get("access-control-allow-origin").is_none());
@@ -452,7 +447,7 @@ mod root_and_cors {
     #[tokio::test]
     async fn clients_without_an_origin_are_unaffected() {
         let (app, _d) = app();
-        let resp = send(&app, "GET", "/gateway/admin/combos", &[]).await;
+        let resp = send(&app, "GET", "/gateway/combos", &[]).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().get("access-control-allow-origin").is_none());
     }
@@ -467,7 +462,7 @@ mod agents_and_sessions {
         let (st, created) = call(
             &app,
             "POST",
-            "/gateway/admin/agents",
+            "/gateway/agents",
             Some(json!({
                 "name": "senior-rust",
                 "description": "Strict Rust reviewer",
@@ -488,7 +483,7 @@ mod agents_and_sessions {
         let ids: Vec<&str> = models["data"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
         assert!(ids.contains(&"agent/senior-rust"), "{ids:?}");
 
-        let (st, del) = call(&app, "DELETE", "/gateway/admin/agents/senior-rust", None, None).await;
+        let (st, del) = call(&app, "DELETE", "/gateway/agents/senior-rust", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(del["status"], "deleted");
     }
@@ -497,19 +492,14 @@ mod agents_and_sessions {
     async fn a_team_is_a_named_roster_of_agents() {
         let (app, _d) = app();
         for name in ["lead", "frontend"] {
-            let (st, _) = call(&app, "POST", "/gateway/admin/agents", Some(json!({ "name": name, "model": "auto" })), None).await;
+            let (st, _) = call(&app, "POST", "/gateway/agents", Some(json!({ "name": name, "model": "auto" })), None).await;
             assert_eq!(st, StatusCode::OK);
         }
-        let (st, _) = call(&app, "POST", "/gateway/admin/teams", Some(json!({ "name": "app", "members": ["missing"] })), None).await;
+        let (st, _) = call(&app, "POST", "/gateway/teams", Some(json!({ "name": "app", "members": ["missing"] })), None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        let (st, created) = call(
-            &app,
-            "POST",
-            "/gateway/admin/teams",
-            Some(json!({ "name": "app", "lead": "lead", "members": ["lead", "frontend"] })),
-            None,
-        )
-        .await;
+        let (st, created) =
+            call(&app, "POST", "/gateway/teams", Some(json!({ "name": "app", "lead": "lead", "members": ["lead", "frontend"] })), None)
+                .await;
         assert_eq!(st, StatusCode::OK);
         let id = created["team"]["id"].as_str().unwrap();
         assert!(id.starts_with("tm_"), "{id}");
@@ -518,7 +508,7 @@ mod agents_and_sessions {
         let (st, renamed) = call(
             &app,
             "POST",
-            "/gateway/admin/teams",
+            "/gateway/teams",
             Some(json!({ "id": id, "name": "app-2", "lead": "lead", "members": ["lead", "frontend"] })),
             None,
         )
@@ -526,9 +516,9 @@ mod agents_and_sessions {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(renamed["team"]["id"], id);
         assert_eq!(renamed["team"]["name"], "app-2");
-        let (_, listed) = call(&app, "GET", "/gateway/admin/teams", None, None).await;
+        let (_, listed) = call(&app, "GET", "/gateway/teams", None, None).await;
         assert_eq!(listed["teams"][0]["id"], id);
-        let (st, del) = call(&app, "DELETE", &format!("/gateway/admin/teams/{id}"), None, None).await;
+        let (st, del) = call(&app, "DELETE", &format!("/gateway/teams/{id}"), None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(del["status"], "deleted");
     }
@@ -543,7 +533,7 @@ mod agents_and_sessions {
     #[tokio::test]
     async fn delete_session_returns_not_found_when_missing() {
         let (app, _d) = app();
-        let (st, resp) = call(&app, "DELETE", "/gateway/admin/sessions/s1", None, None).await;
+        let (st, resp) = call(&app, "DELETE", "/gateway/sessions/s1", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(resp["status"], "not_found");
     }
@@ -551,22 +541,17 @@ mod agents_and_sessions {
     #[tokio::test]
     async fn subagents_spawn_list_and_delete_work() {
         let (app, _d) = app();
-        let (st, spawned) = call(
-            &app,
-            "POST",
-            "/gateway/admin/subagents",
-            Some(json!({ "role": "Reviewer", "model": "auto", "prompt": "Check code" })),
-            None,
-        )
-        .await;
+        let (st, spawned) =
+            call(&app, "POST", "/gateway/subagents", Some(json!({ "role": "Reviewer", "model": "auto", "prompt": "Check code" })), None)
+                .await;
         assert_eq!(st, StatusCode::OK);
         let id = spawned["subagent"]["id"].as_str().unwrap().to_string();
 
-        let (st, snap) = call(&app, "GET", "/gateway/admin/activity", None, None).await;
+        let (st, snap) = call(&app, "GET", "/gateway/activity", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert!(!snap["subagents"].as_array().unwrap().is_empty());
 
-        let (st, del) = call(&app, "DELETE", &format!("/gateway/admin/subagents/{id}"), None, None).await;
+        let (st, del) = call(&app, "DELETE", &format!("/gateway/subagents/{id}"), None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(del["status"], "deleted");
     }
@@ -578,13 +563,13 @@ mod mcp_connectors {
     #[tokio::test]
     async fn crud_toggle_and_validation_work() {
         let (app, _d) = app();
-        let (st, _) = call(&app, "POST", "/gateway/admin/mcp", Some(json!({ "name": "fs", "transport": "stdio" })), None).await;
+        let (st, _) = call(&app, "POST", "/gateway/mcp", Some(json!({ "name": "fs", "transport": "stdio" })), None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
 
         let (st, created) = call(
             &app,
             "POST",
-            "/gateway/admin/mcp",
+            "/gateway/mcp",
             Some(json!({
                 "name": "fs",
                 "transport": "stdio",
@@ -597,22 +582,22 @@ mod mcp_connectors {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(created["mcp_server"]["enabled"], true);
 
-        let (st, list) = call(&app, "GET", "/gateway/admin/mcp", None, None).await;
+        let (st, list) = call(&app, "GET", "/gateway/mcp", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(list["mcp_servers"].as_array().unwrap().len(), 1);
 
-        let (st, toggled) = call(&app, "PATCH", "/gateway/admin/mcp/fs/toggle", None, None).await;
+        let (st, toggled) = call(&app, "PATCH", "/gateway/mcp/fs/toggle", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(toggled["mcp_server"]["enabled"], false);
 
-        let (st, del) = call(&app, "DELETE", "/gateway/admin/mcp/fs", None, None).await;
+        let (st, del) = call(&app, "DELETE", "/gateway/mcp/fs", None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(del["status"], "deleted");
 
         let (st, http_mcp) = call(
             &app,
             "POST",
-            "/gateway/admin/mcp",
+            "/gateway/mcp",
             Some(json!({
                 "name": "notion",
                 "transport": "http",

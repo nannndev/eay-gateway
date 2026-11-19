@@ -1,4 +1,4 @@
-//! eay-gateway's HTTP layer: the OpenAI-compatible `/v1` API and the `/gateway/admin` API,
+//! eay-gateway's HTTP layer: the OpenAI-compatible `/v1` API and management routes under `/gateway/<resource>`,
 //! on top of `eay_gateway_core`.
 
 pub mod error;

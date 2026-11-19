@@ -10,12 +10,20 @@ All notable changes to `eay-gateway` are documented in this file.
   The request shows up as the root of the run tree. Cancelling a run stops the runs under it, and
   a saved agent delegates only when its own policy allows it. The lead and its workers share a
   team thread (`eay_say`). An agent can list the MCP servers it uses on a loopback request.
-- **Rosters:** `POST /gateway/admin/teams` saves a list of agents under a stable id (`tm_…`).
+- **Rosters:** `POST /gateway/teams` saves a list of agents under a stable id (`tm_…`).
   `x-eay-team` limits who a request may delegate to. A session stores that id and keeps its own
   transcript, so renaming the team or sharing it across two sessions does not mix the chats.
 - Cancelling a lead while its workers are running stops the request there. The model is not asked
   for a wrap-up turn. A provider call that is already in flight still finishes.
-- `GET /gateway/admin/subagents/tree`: runs nested by parent, for team views.
+- `GET /gateway/subagents/tree`: runs nested by parent, for team views.
+- **Usage by speaker:** each request log row stores the agent (or a worker's role) and the roster id.
+  `GET /gateway/analytics` adds `agents` and `teams`, each with the upstream models they used.
+  Older rows have neither and stay out of those lists.
+
+### Changed
+- Management routes dropped the `/admin` segment. `/gateway/admin/teams` is now
+  `/gateway/teams`, and the same for accounts, providers, keys, agents, sessions, and the rest.
+  `/v1`, `/gateway/v1`, and `/gateway/health` are unchanged. The admin token is unchanged.
 
 ## [0.3.1] - 2026-11-19
 

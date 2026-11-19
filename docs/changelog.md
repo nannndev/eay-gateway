@@ -11,6 +11,11 @@ All notable changes to **eay-gateway** are listed below.
   (`x-eay-team`, id `tm_…`) limits which agents that thread may call. Sessions store the team id
   and keep separate chats, so a rename does not drop them. Cancelling the lead skips its wrap-up
   turn.
+- Usage rows now store the agent (or a worker's role) and the roster id. `GET /gateway/analytics`
+  lists `agents` and `teams` with the upstream models each one used. Older rows stay out of those lists.
+- Management routes dropped the `/admin` segment. `/gateway/admin/teams` is now
+  `/gateway/teams`, and the same for accounts, providers, keys, agents, sessions, and the rest.
+  `/v1`, `/gateway/v1`, and `/gateway/health` are unchanged. The admin token is unchanged.
 
 ## v0.3.1 — 2026-11-19
 

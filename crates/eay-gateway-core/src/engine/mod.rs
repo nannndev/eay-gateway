@@ -32,6 +32,12 @@ pub struct ChatOptions {
     pub team_members: Option<Vec<String>>,
 }
 
+/// Roster for one request. `id` is empty until the header or the session has been resolved.
+struct ResolvedTeam {
+    id: Option<String>,
+    members: Vec<String>,
+}
+
 /// How long a `delegate` call waits for its subagent.
 const DELEGATE_WAIT_SECS: u64 = 600;
 
@@ -438,6 +444,8 @@ impl GatewayEngine {
         t0: std::time::Instant,
         streaming: bool,
         cooldown_secs: u64,
+        usage_agent: Option<&str>,
+        usage_team: Option<&str>,
     ) -> String {
         let status = upstream.status();
         let retry_after = upstream.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
@@ -455,6 +463,8 @@ impl GatewayEngine {
             status_code: i64::from(status.as_u16()),
             error: Some(&err_text),
             streaming,
+            agent: usage_agent,
+            team: usage_team,
         });
         let mut msg = format!("{} HTTP {}: {}", target.public(), status, err_text.chars().take(300).collect::<String>());
         if let Some(secs) = cooldown_for(status.as_u16(), retry_after, &err_text, cooldown_secs) {
@@ -584,6 +594,8 @@ impl GatewayEngine {
                         t0,
                         false,
                         settings.cooldown_secs,
+                        None,
+                        None,
                     )
                     .await;
                 continue;
@@ -609,6 +621,8 @@ impl GatewayEngine {
                 status_code: i64::from(status.as_u16()),
                 error: None,
                 streaming: false,
+                agent: None,
+                team: None,
             });
             return Ok(PassthroughReply { status: status.as_u16(), content_type, body: resp_bytes });
         }
@@ -619,9 +633,9 @@ impl GatewayEngine {
     /// Members of the roster for this request. `None` means every saved agent may be delegated to.
     /// A header binds the session; later requests on that session reuse it. Two sessions may name
     /// the same roster and still keep separate transcripts.
-    fn resolve_team(&self, opts: &ChatOptions, session_storage: Option<&str>) -> Result<Option<Vec<String>>, ChatError> {
+    fn resolve_team(&self, opts: &ChatOptions, session_storage: Option<&str>) -> Result<Option<ResolvedTeam>, ChatError> {
         if let Some(members) = &opts.team_members {
-            return Ok(Some(members.clone()));
+            return Ok(Some(ResolvedTeam { id: opts.team.clone().filter(|id| !id.is_empty()), members: members.clone() }));
         }
         let named = match &opts.team {
             Some(raw) => {
@@ -641,7 +655,7 @@ impl GatewayEngine {
                 self.store.set_session_team(id, &team.id).map_err(|e| gateway_err(400, e))?;
             }
         }
-        Ok(Some(team.members))
+        Ok(Some(ResolvedTeam { id: Some(team.id), members: team.members }))
     }
 
     /// `token` is a team id, or a name when exactly one team uses it.
@@ -737,7 +751,9 @@ impl GatewayEngine {
 
         // Sessions are namespaced by caller so one key cannot read or extend another key's memory.
         let session_key = opts.session_id.as_deref().map(|sid| session_storage_id(key.as_ref(), sid));
-        let team_members = self.resolve_team(&opts, session_key.as_deref())?;
+        let roster = self.resolve_team(&opts, session_key.as_deref())?;
+        let team_id = roster.as_ref().and_then(|t| t.id.clone());
+        let team_members = roster.map(|t| t.members);
         if let (Some(name), Some(members)) = (running_agent.as_deref(), team_members.as_ref()) {
             if !members.iter().any(|m| m == name) {
                 return Err(gateway_err(400, format!("Agent '{name}' is not on this team")));
@@ -760,6 +776,8 @@ impl GatewayEngine {
         }
 
         let agent_label = opts.agent_label.clone().or_else(|| agent_personality.as_ref().map(|(n, _)| n.clone()));
+        // Usage names the saved agent. A worker with no profile keeps its role. A raw model stays blank.
+        let usage_agent = running_agent.clone().or(agent_label.clone()).filter(|name| !name.is_empty());
         if let Some((name, persona)) = agent_personality {
             if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
                 msgs.insert(0, json!({ "role": "system", "content": format!("[Agent Personality: {name}]\n{persona}") }));
@@ -843,6 +861,8 @@ impl GatewayEngine {
                             parent_id.as_deref(),
                             agent_label.as_deref(),
                             media_req,
+                            usage_agent.as_deref(),
+                            team_id.as_deref(),
                         )
                         .await?
                     else {
@@ -919,6 +939,7 @@ impl GatewayEngine {
                                 &mcp_servers,
                                 opts.mcp_allowed,
                                 team_members.as_deref(),
+                                team_id.as_deref(),
                             );
                             runs.push(async move { (call_id.clone(), fut.await) });
                         }
@@ -1012,7 +1033,17 @@ impl GatewayEngine {
         }
 
         let reply = self
-            .execute_chat_turn(key.as_ref(), &body, &req_model, &run_id, parent_id.as_deref(), agent_label.as_deref(), media_req)
+            .execute_chat_turn(
+                key.as_ref(),
+                &body,
+                &req_model,
+                &run_id,
+                parent_id.as_deref(),
+                agent_label.as_deref(),
+                media_req,
+                usage_agent.as_deref(),
+                team_id.as_deref(),
+            )
             .await?;
         team.settle_chat(&reply);
         let Some(sid) = session_key else { return Ok(reply) };
@@ -1104,6 +1135,8 @@ impl GatewayEngine {
         parent_id: Option<&str>,
         agent_label: Option<&str>,
         media_req: crate::translate::MediaRequirements,
+        usage_agent: Option<&str>,
+        usage_team: Option<&str>,
     ) -> Result<ChatReply, ChatError> {
         let wants_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
         let (mut targets, settings, key_name) = self.check_key_and_resolve(key, req_model)?;
@@ -1188,7 +1221,19 @@ impl GatewayEngine {
             };
             if !upstream.status().is_success() {
                 last_error = self
-                    .handle_upstream_error(upstream, &target, acc.as_ref(), &cool, key, &key_name, t0, wants_stream, settings.cooldown_secs)
+                    .handle_upstream_error(
+                        upstream,
+                        &target,
+                        acc.as_ref(),
+                        &cool,
+                        key,
+                        &key_name,
+                        t0,
+                        wants_stream,
+                        settings.cooldown_secs,
+                        usage_agent,
+                        usage_team,
+                    )
                     .await;
                 eprintln!("[GATEWAY CHAT] {last_error}");
                 self.activity.emit_phase(
@@ -1230,6 +1275,8 @@ impl GatewayEngine {
                 key_name: key_name.clone(),
                 provider: target.provider.clone(),
                 model: target.model.clone(),
+                usage_agent: usage_agent.map(str::to_string),
+                usage_team: usage_team.map(str::to_string),
                 t0,
                 streaming: wants_stream,
             };
@@ -1329,6 +1376,7 @@ impl GatewayEngine {
         mcp_servers: &[String],
         mcp_allowed: bool,
         team_members: Option<&[String]>,
+        team_id: Option<&str>,
     ) -> String {
         let task = args["task"].as_str().unwrap_or("").trim();
         if task.is_empty() {
@@ -1357,6 +1405,7 @@ impl GatewayEngine {
             mcp_allowed,
             inherited_policy: Some(child_policy.clone()),
             depth: depth + 1,
+            team: team_id.filter(|id| !id.is_empty()).map(str::to_string),
             team_members: team_members.map(|m| m.to_vec()),
             ..Default::default()
         };
@@ -1629,6 +1678,8 @@ mod tests {
                 status_code: 429,
                 error: None,
                 streaming: false,
+                agent: None,
+                team: None,
             });
         }
         assert!(e.admit_rate(Some(&k)).is_ok());

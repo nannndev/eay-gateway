@@ -4,7 +4,7 @@ Model ids are `<alias>/<model>`. The **alias** column below is what goes before 
 
 ## Subscription providers (OAuth)
 
-Connect with `POST /gateway/admin/accounts/<id>/start` (see [Getting started](getting-started.md#log-in-with-a-subscription)).
+Connect with `POST /gateway/accounts/<id>/start` (see [Getting started](getting-started.md#log-in-with-a-subscription)).
 
 | Provider | Id | Alias | Login | Live quota |
 |---|---|---|---|---|
@@ -26,19 +26,19 @@ Connect with `POST /gateway/admin/accounts/<id>/start` (see [Getting started](ge
 ⚠ Experimental: these impersonate the official client. See the README.
 
 **Gemini CLI** needs your own Google OAuth client (Desktop type). Save it once with
-`POST /gateway/admin/settings` `{"gemini_oauth_client_id":"…","gemini_oauth_client_secret":"…"}`.
+`POST /gateway/settings` `{"gemini_oauth_client_id":"…","gemini_oauth_client_secret":"…"}`.
 
 **Imports** read a login the official tool already saved, including its refresh token:
 
 | Provider | Endpoint | Reads |
 |---|---|---|
-| Codex | `POST /gateway/admin/providers/codex/import` | `~/.codex/auth.json` (or `$CODEX_HOME`) |
-| Kiro | `POST /gateway/admin/providers/kiro/import` | `~/.aws/sso/cache/` and the Kiro profile |
+| Codex | `POST /gateway/providers/codex/import` | `~/.codex/auth.json` (or `$CODEX_HOME`) |
+| Kiro | `POST /gateway/providers/kiro/import` | `~/.aws/sso/cache/` and the Kiro profile |
 
 ## API-key providers
 
-Connect with `POST /gateway/admin/providers/<id>/connect` `{"api_key":"…","base_url":"…"}`.
-Add more keys with `POST /gateway/admin/providers/<id>/keys` `{"api_key":"…"}`.
+Connect with `POST /gateway/providers/<id>/connect` `{"api_key":"…","base_url":"…"}`.
+Add more keys with `POST /gateway/providers/<id>/keys` `{"api_key":"…"}`.
 
 | Provider | Id | Alias | Notes |
 |---|---|---|---|
@@ -99,10 +99,10 @@ Add more keys with `POST /gateway/admin/providers/<id>/keys` `{"api_key":"…"}`
 
 Each provider starts with a short built-in list. Once connected, the gateway fetches the provider's
 own list (`/models`, or the provider's equivalent) and refreshes it daily, or on demand with
-`POST /gateway/admin/providers/<id>/models/sync`. Subscription providers with a model API
+`POST /gateway/providers/<id>/models/sync`. Subscription providers with a model API
 (Copilot, Kimi, Kilo Code, Nous, Cline, Grok CLI, Antigravity) sync the same way.
 
-Add models the provider doesn't list with `POST /gateway/admin/providers/<id>/models`
+Add models the provider doesn't list with `POST /gateway/providers/<id>/models`
 `{"model":"…"}`. Custom models are tried first in `auto`.
 
 ## Cost
@@ -110,3 +110,6 @@ Add models the provider doesn't list with `POST /gateway/admin/providers/<id>/mo
 Requests log input, output and cached tokens, plus an estimated cost from a built-in price table
 (what the request would cost on the provider's API). Subscriptions don't bill per token, so treat
 it as a usage comparison, not an invoice. Models missing from the table count as $0.
+
+Daily totals and that estimate are `GET /gateway/analytics`. The raw log (`GET /gateway/usage`)
+lists each attempt and leaves cached tokens and cost off the row. See [Usage and analytics](api.md#usage-and-analytics).

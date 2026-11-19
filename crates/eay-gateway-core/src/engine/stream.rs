@@ -30,6 +30,9 @@ pub(super) struct UsageGuard {
     pub(super) key_name: String,
     pub(super) provider: String,
     pub(super) model: String,
+    /// Saved agent or worker role written on the usage row. Separate from `agent`, which is the activity label.
+    pub(super) usage_agent: Option<String>,
+    pub(super) usage_team: Option<String>,
     pub(super) t0: std::time::Instant,
     pub(super) streaming: bool,
 }
@@ -54,6 +57,8 @@ impl Drop for UsageGuard {
             status_code: 200,
             error: None,
             streaming: self.streaming,
+            agent: self.usage_agent.as_deref(),
+            team: self.usage_team.as_deref(),
         });
         if let Some(id) = &self.key_id {
             self.store.touch_virtual_key(id, inp, out);

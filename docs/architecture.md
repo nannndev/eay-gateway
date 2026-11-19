@@ -18,7 +18,7 @@ crates/
 │   ├── models.rs          key verification and model list sync
 │   └── pricing.rs         estimated cost per request
 └── eay-gateway/           HTTP server and the `eay-gateway` binary
-    ├── routes/            axum handlers: /v1, /gateway/admin, admin-token, CORS and per-key concurrency middleware
+    ├── routes/            axum handlers: /v1 and /gateway/<resource> (accounts, agents, keys, …), admin-token, CORS and per-key concurrency middleware
     ├── error.rs           GatewayError → HTTP status + JSON body
     └── main.rs            flags, data folder + migration, lock, idle exit, hourly model refresh
 ```
@@ -88,12 +88,13 @@ One SQLite file, `gateway.db`:
 |---|---|
 | `providers` | API-key providers: encrypted main key, base URL, enabled, custom models, synced models + time, last check |
 | `accounts` | Subscription accounts and extra API keys: provider, label, email, encrypted credential JSON, order, enabled, last error |
-| `usage` | One row per attempt (failover attempts included): provider, model, tokens (input, output, cached), cost, duration, status, virtual key |
+| `usage` | One row per upstream attempt (a failed failover is its own row): provider, model, tokens (input, output, cached), estimated cost, duration, status, virtual key, `agent` (saved name or worker role), `team` (roster id). `GET /gateway/usage` omits cached tokens and cost; analytics returns them and groups `agents` and `teams` |
 | `keys` | Virtual keys: SHA-256 of the secret, limits, budgets (`max_tokens_budget`, `max_cost_usd`), `max_concurrent`, `default_skills`, `tool_policy`, totals |
 | `combos` | Combo name → JSON list of targets |
 | `skills` | Context/Skill presets: name, description, prompt, enabled |
-| `agents` | Agent profiles: model, skills, personality, temperature, max_tokens, `tool_policy` |
-| `sessions` | Conversation memory: `key:<key-id>:<session>` for virtual keys, `local:<session>` without a key |
+| `agents` | Agent profiles: description, model, skills, personality, temperature, max_tokens, `tool_policy`, `mcp` |
+| `teams` | Rosters: id (`tm_…`), name (a label, not unique), lead, members |
+| `sessions` | Conversation memory: `key:<key-id>:<session>` for virtual keys, `local:<session>` without a key. `team` stores a roster id |
 | `subagent_runs` | Finished subagent runs (newest 500), restored into memory at startup |
 | `mcp_servers` | External MCP connectors (`stdio` command/args/env or `http` url/headers) |
 | `settings` | Routing settings, Gemini OAuth client |
