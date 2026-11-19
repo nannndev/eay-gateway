@@ -3,6 +3,7 @@ pub mod agents;
 pub mod connectors;
 pub mod inference;
 pub mod keys;
+pub mod projects;
 pub mod providers;
 pub mod runs;
 pub mod settings;
@@ -242,6 +243,14 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/keys", get(keys::handle_list_keys).post(keys::handle_create_key))
         .route("/gateway/keys/:id/toggle", patch(keys::handle_toggle_key))
         .route("/gateway/keys/:id", delete(keys::handle_delete_key))
+        .route("/gateway/keys/:id/project", put(projects::handle_link_key))
+        // Projects
+        .route("/gateway/projects", get(projects::handle_list_projects).post(projects::handle_create_project))
+        .route(
+            "/gateway/projects/:id",
+            get(projects::handle_get_project).put(projects::handle_put_project).delete(projects::handle_delete_project),
+        )
+        .route("/gateway/projects/:id/usage", get(projects::handle_project_usage))
         // Combos
         .route("/gateway/combos", get(settings::handle_list_combos).post(settings::handle_save_combo))
         .route("/gateway/combos/:name", put(settings::handle_put_combo).delete(settings::handle_delete_combo))
@@ -253,6 +262,7 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/agents/:name", put(agents::handle_put_agent).delete(agents::handle_delete_agent))
         .route("/gateway/teams", get(agents::handle_list_teams).post(agents::handle_save_team))
         .route("/gateway/teams/:id", delete(agents::handle_delete_team))
+        .route("/gateway/teams/:id/project", put(projects::handle_link_team))
         .route("/gateway/sessions", get(agents::handle_list_sessions))
         .route("/gateway/sessions/:id", get(agents::handle_get_session).delete(agents::handle_delete_session))
         // Live Activity & Subagents

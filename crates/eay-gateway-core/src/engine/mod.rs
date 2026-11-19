@@ -30,6 +30,20 @@ pub struct ChatOptions {
     /// Member names once the roster is loaded. `None` means no roster, so every saved agent is offered.
     /// A child run carries this so it cannot delegate outside the roster.
     pub team_members: Option<Vec<String>>,
+    /// Project from `x-eay-project` (id `prj_…`). A key bound to a project overrides it; a child run
+    /// inherits its parent's.
+    pub project: Option<String>,
+}
+
+/// Who a usage row is billed to. Cloned into stream guards, so it owns its strings.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UsageTags {
+    /// Saved agent that spoke, or a worker's role. Empty for a raw model call.
+    pub agent: Option<String>,
+    /// Roster id (`tm_…`).
+    pub team: Option<String>,
+    /// Project id (`prj_…`).
+    pub project: Option<String>,
 }
 
 /// Roster for one request. `id` is empty until the header or the session has been resolved.
@@ -444,8 +458,7 @@ impl GatewayEngine {
         t0: std::time::Instant,
         streaming: bool,
         cooldown_secs: u64,
-        usage_agent: Option<&str>,
-        usage_team: Option<&str>,
+        tags: &UsageTags,
     ) -> String {
         let status = upstream.status();
         let retry_after = upstream.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
@@ -463,8 +476,9 @@ impl GatewayEngine {
             status_code: i64::from(status.as_u16()),
             error: Some(&err_text),
             streaming,
-            agent: usage_agent,
-            team: usage_team,
+            agent: tags.agent.as_deref(),
+            team: tags.team.as_deref(),
+            project: tags.project.as_deref(),
         });
         let mut msg = format!("{} HTTP {}: {}", target.public(), status, err_text.chars().take(300).collect::<String>());
         if let Some(secs) = cooldown_for(status.as_u16(), retry_after, &err_text, cooldown_secs) {
@@ -546,6 +560,8 @@ impl GatewayEngine {
         self.admit_rate(key.as_ref())?;
         let (targets, settings, key_name) = self.check_key_and_resolve(key.as_ref(), req_model)?;
         let mut last_error = format!("no connected OpenAI-compatible provider can serve '{req_model}'");
+        // Embeddings, images and audio count toward the key's project too.
+        let passthrough_tags = UsageTags { project: key.as_ref().and_then(|k| k.project.clone()), ..Default::default() };
 
         for (target, acc) in self.plan_attempts(&targets, &settings) {
             if target.kind != "apikey" || !self.store.is_provider_enabled(&target.provider) {
@@ -594,8 +610,7 @@ impl GatewayEngine {
                         t0,
                         false,
                         settings.cooldown_secs,
-                        None,
-                        None,
+                        &passthrough_tags,
                     )
                     .await;
                 continue;
@@ -623,11 +638,43 @@ impl GatewayEngine {
                 streaming: false,
                 agent: None,
                 team: None,
+                project: passthrough_tags.project.as_deref(),
             });
             return Ok(PassthroughReply { status: status.as_u16(), content_type, body: resp_bytes });
         }
 
         Err(gateway_err(502, format!("No connected AI provider could respond: {last_error}")))
+    }
+
+    /// The project a request runs in. A key bound to a project always wins, so a key cannot reach
+    /// another project by sending a header; otherwise `x-eay-project`, then the session's binding.
+    /// The first request that names a project binds its session to it. An unknown id is an error.
+    fn resolve_project(
+        &self,
+        key: Option<&VirtualKeyRecord>,
+        opts: &ChatOptions,
+        session_storage: Option<&str>,
+    ) -> Result<Option<crate::store::ProjectRecord>, ChatError> {
+        let from_key = key.and_then(|k| k.project.clone());
+        let asked = opts.project.clone().filter(|p| !p.is_empty());
+        if let (Some(bound), Some(asked)) = (&from_key, &asked) {
+            if bound != asked {
+                return Err(gateway_err(403, format!("This key belongs to project {bound}, not {asked}")));
+            }
+        }
+        let id = from_key.or(asked).or_else(|| session_storage.and_then(|s| self.store.session_project(s)));
+        let Some(id) = id else { return Ok(None) };
+        let project = self.store.get_project(&id).ok_or_else(|| gateway_err(404, format!("Project '{id}' not found")))?;
+        if let Some(sid) = session_storage {
+            match self.store.session_project(sid) {
+                Some(bound) if bound != project.id => {
+                    return Err(gateway_err(409, format!("Session belongs to project {bound}; start a new session for {}", project.id)));
+                }
+                Some(_) => {}
+                None => self.store.set_session_project(sid, &project.id).map_err(|e| gateway_err(400, e))?,
+            }
+        }
+        Ok(Some(project))
     }
 
     /// Members of the roster for this request. `None` means every saved agent may be delegated to.
@@ -751,6 +798,7 @@ impl GatewayEngine {
 
         // Sessions are namespaced by caller so one key cannot read or extend another key's memory.
         let session_key = opts.session_id.as_deref().map(|sid| session_storage_id(key.as_ref(), sid));
+        let project = self.resolve_project(key.as_ref(), &opts, session_key.as_deref())?;
         let roster = self.resolve_team(&opts, session_key.as_deref())?;
         let team_id = roster.as_ref().and_then(|t| t.id.clone());
         let team_members = roster.map(|t| t.members);
@@ -778,9 +826,18 @@ impl GatewayEngine {
         let agent_label = opts.agent_label.clone().or_else(|| agent_personality.as_ref().map(|(n, _)| n.clone()));
         // Usage names the saved agent. A worker with no profile keeps its role. A raw model stays blank.
         let usage_agent = running_agent.clone().or(agent_label.clone()).filter(|name| !name.is_empty());
+        let usage_tags = UsageTags { agent: usage_agent.clone(), team: team_id.clone(), project: project.as_ref().map(|p| p.id.clone()) };
+        // The project's instructions come first, so an agent's personality and skills refine them.
+        if let Some(text) = project.as_ref().map(|p| p.instructions.trim()).filter(|t| !t.is_empty()) {
+            if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                let name = project.as_ref().map(|p| p.name.as_str()).unwrap_or("");
+                msgs.insert(0, json!({ "role": "system", "content": format!("[Project: {name}]\n{text}") }));
+            }
+        }
         if let Some((name, persona)) = agent_personality {
             if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-                msgs.insert(0, json!({ "role": "system", "content": format!("[Agent Personality: {name}]\n{persona}") }));
+                let at = usize::from(msgs.first().and_then(|m| m["content"].as_str()).is_some_and(|c| c.starts_with("[Project: ")));
+                msgs.insert(at, json!({ "role": "system", "content": format!("[Agent Personality: {name}]\n{persona}") }));
             }
         }
         self.inject_skills(&mut body, &combined_skills);
@@ -861,8 +918,7 @@ impl GatewayEngine {
                             parent_id.as_deref(),
                             agent_label.as_deref(),
                             media_req,
-                            usage_agent.as_deref(),
-                            team_id.as_deref(),
+                            &usage_tags,
                         )
                         .await?
                     else {
@@ -940,6 +996,7 @@ impl GatewayEngine {
                                 opts.mcp_allowed,
                                 team_members.as_deref(),
                                 team_id.as_deref(),
+                                usage_tags.project.as_deref(),
                             );
                             runs.push(async move { (call_id.clone(), fut.await) });
                         }
@@ -1041,8 +1098,7 @@ impl GatewayEngine {
                 parent_id.as_deref(),
                 agent_label.as_deref(),
                 media_req,
-                usage_agent.as_deref(),
-                team_id.as_deref(),
+                &usage_tags,
             )
             .await?;
         team.settle_chat(&reply);
@@ -1135,8 +1191,7 @@ impl GatewayEngine {
         parent_id: Option<&str>,
         agent_label: Option<&str>,
         media_req: crate::translate::MediaRequirements,
-        usage_agent: Option<&str>,
-        usage_team: Option<&str>,
+        tags: &UsageTags,
     ) -> Result<ChatReply, ChatError> {
         let wants_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
         let (mut targets, settings, key_name) = self.check_key_and_resolve(key, req_model)?;
@@ -1231,8 +1286,7 @@ impl GatewayEngine {
                         t0,
                         wants_stream,
                         settings.cooldown_secs,
-                        usage_agent,
-                        usage_team,
+                        tags,
                     )
                     .await;
                 eprintln!("[GATEWAY CHAT] {last_error}");
@@ -1275,8 +1329,7 @@ impl GatewayEngine {
                 key_name: key_name.clone(),
                 provider: target.provider.clone(),
                 model: target.model.clone(),
-                usage_agent: usage_agent.map(str::to_string),
-                usage_team: usage_team.map(str::to_string),
+                tags: tags.clone(),
                 t0,
                 streaming: wants_stream,
             };
@@ -1377,6 +1430,7 @@ impl GatewayEngine {
         mcp_allowed: bool,
         team_members: Option<&[String]>,
         team_id: Option<&str>,
+        project: Option<&str>,
     ) -> String {
         let task = args["task"].as_str().unwrap_or("").trim();
         if task.is_empty() {
@@ -1407,6 +1461,7 @@ impl GatewayEngine {
             depth: depth + 1,
             team: team_id.filter(|id| !id.is_empty()).map(str::to_string),
             team_members: team_members.map(|m| m.to_vec()),
+            project: project.map(str::to_string),
             ..Default::default()
         };
         let root = self.activity.team_root(parent_run);
@@ -1680,6 +1735,7 @@ mod tests {
                 streaming: false,
                 agent: None,
                 team: None,
+                project: None,
             });
         }
         assert!(e.admit_rate(Some(&k)).is_ok());

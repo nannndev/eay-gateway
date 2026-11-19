@@ -2,6 +2,12 @@
 
 All notable changes to **eay-gateway** are listed below.
 
+## v0.5.0 — 2026-11-19
+
+- **Projects:** group keys, teams, sessions and usage under one id (`prj_…`), with shared
+  instructions for every agent and free-form metadata for your app. Send `x-eay-project`, or link
+  a key so everything it does lands in its project. Usage per project, by model, agent and team.
+
 ## v0.4.0 — 2026-11-19
 
 - **Agent teams:** a lead agent hands work to your saved agents (reviewer, tester, …), several at

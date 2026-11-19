@@ -40,12 +40,13 @@ impl GatewayStore {
         let cost = u.model.map_or(0.0, |m| crate::pricing::cost(m, u.input_tokens, u.output_tokens, u.cached_tokens));
         let agent = clip_usage_label(u.agent);
         let team = clip_usage_label(u.team);
+        let project = clip_usage_label(u.project);
         let _ = conn.execute(
-            "INSERT INTO usage (id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, cached_tokens, cost, agent, team) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO usage (id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, cached_tokens, cost, agent, team, project) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 id, now(), u.key_id, u.key_name, u.provider, u.model,
                 u.input_tokens, u.output_tokens, u.duration_ms, u.status, u.status_code, u.error,
-                i64::from(u.streaming), u.cached_tokens, cost, agent, team
+                i64::from(u.streaming), u.cached_tokens, cost, agent, team, project
             ],
         );
     }
@@ -166,6 +167,39 @@ impl GatewayStore {
         let agents = fold_agents(agent_rows);
         let teams = fold_teams(&conn, team_rows);
         json!({ "days": days_json, "recent": recent, "top_models": top, "models": models, "agents": agents, "teams": teams })
+    }
+
+    /// One project's usage since `since` (unix seconds, 0 = all time): totals, plus per model,
+    /// per agent and per team, each with requests, tokens and estimated cost.
+    pub fn project_usage(&self, project: &str, since: f64) -> Value {
+        let conn = self.conn.lock();
+        let totals = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(COALESCE(input_tokens,0)), SUM(COALESCE(output_tokens,0)), SUM(COALESCE(cached_tokens,0)),
+                        SUM(COALESCE(cost,0)), SUM(CASE WHEN COALESCE(status_code,200) >= 400 THEN 1 ELSE 0 END)
+                 FROM usage WHERE project = ?1 AND ts >= ?2",
+                params![project, since],
+                |r| {
+                    Ok(json!({
+                        "requests": r.get::<_, i64>(0)?, "input_tokens": r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        "output_tokens": r.get::<_, Option<i64>>(2)?.unwrap_or(0), "cached_tokens": r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        "cost": r.get::<_, Option<f64>>(4)?.unwrap_or(0.0), "errors": r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    }))
+                },
+            )
+            .unwrap_or_else(|_| json!({}));
+        let by = |col: &str| {
+            query_rows(
+                &conn,
+                &format!(
+                    "SELECT COALESCE({col},''), COUNT(*), SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0)) AS tok, SUM(COALESCE(cost,0))
+                     FROM usage WHERE project = ?1 AND ts >= ?2 GROUP BY {col} ORDER BY tok DESC LIMIT 50"
+                ),
+                params![project, since],
+                |r| Ok(json!({ "name": r.get::<_, String>(0)?, "requests": r.get::<_, i64>(1)?, "tokens": r.get::<_, i64>(2)?, "cost": r.get::<_, f64>(3)? })),
+            )
+        };
+        json!({ "totals": totals, "models": by("model"), "agents": by("agent"), "teams": by("team") })
     }
 
     pub fn get_stats(&self) -> Value {

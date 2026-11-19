@@ -8,7 +8,8 @@ mod usage;
 mod tests;
 
 pub use models::{
-    AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProviderRecord, SkillRecord, TeamRecord, UsageEntry, VirtualKeyRecord,
+    AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProjectRecord, ProviderRecord, SkillRecord, TeamRecord, UsageEntry,
+    VirtualKeyRecord,
 };
 
 use crate::cipher::Cipher;
@@ -131,6 +132,10 @@ impl GatewayStore {
               id TEXT PRIMARY KEY, name TEXT NOT NULL, lead TEXT NOT NULL,
               members TEXT NOT NULL DEFAULT '[]', updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS projects (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, instructions TEXT NOT NULL DEFAULT '',
+              metadata TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS mcp_servers (
               name TEXT PRIMARY KEY, transport TEXT NOT NULL DEFAULT 'stdio',
               command TEXT, args TEXT NOT NULL DEFAULT '[]',
@@ -156,7 +161,14 @@ impl GatewayStore {
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN cost REAL", []);
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN agent TEXT", []);
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN team TEXT", []);
+        // Before the project columns: this rebuilds `teams`, and a column added earlier would be lost.
         migrate_named_teams(&conn)?;
+        // Projects group keys, teams, sessions and usage under one id (`prj_…`).
+        let _ = conn.execute("ALTER TABLE usage ADD COLUMN project TEXT", []);
+        let _ = conn.execute("ALTER TABLE keys ADD COLUMN project TEXT", []);
+        let _ = conn.execute("ALTER TABLE teams ADD COLUMN project TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN project TEXT", []);
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS usage_project ON usage(project, ts)", []);
         Ok(())
     }
 }

@@ -2,6 +2,24 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
+## [0.5.0] - 2026-11-19
+
+### Added
+- **Projects** (`prj_…`): a container an app uses to group its work. `POST /gateway/projects` with
+  a name, optional `instructions` (added as a system prompt to every agent and subagent in the
+  project) and free-form `metadata` the gateway stores but never reads.
+- `x-eay-project` runs a request in a project. A key linked to a project
+  (`PUT /gateway/keys/:id/project`) always uses it and cannot reach another one (`403`). A session
+  is bound to its first project; using it for another is `409`. Subagents inherit the project.
+- `GET /gateway/projects/:id` lists the project's keys, teams and sessions;
+  `GET /gateway/projects/:id/usage` reports requests, tokens, cached tokens, estimated cost and
+  errors, per model, agent and team. Teams link with `PUT /gateway/teams/:id/project`.
+- Deleting a project keeps its keys, teams, sessions and usage, unlinked.
+
+### Upgrade notes
+- The database gains a `projects` table and `project` columns on keys, teams, sessions and usage,
+  added on first start. Existing data is untouched and belongs to no project.
+
 ## [0.4.0] - 2026-11-19
 
 ### Added

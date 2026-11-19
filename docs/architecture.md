@@ -95,6 +95,7 @@ One SQLite file, `gateway.db`:
 | `agents` | Agent profiles: description, model, skills, personality, temperature, max_tokens, `tool_policy`, `mcp` |
 | `teams` | Rosters: id (`tm_…`), name (a label, not unique), lead, members |
 | `sessions` | Conversation memory: `key:<key-id>:<session>` for virtual keys, `local:<session>` without a key. `team` stores a roster id |
+| `projects` | Projects: name, instructions, app metadata (JSON). Keys, teams, sessions and usage carry a `project` column |
 | `subagent_runs` | Finished subagent runs (newest 500), restored into memory at startup |
 | `mcp_servers` | External MCP connectors (`stdio` command/args/env or `http` url/headers) |
 | `settings` | Routing settings, Gemini OAuth client |

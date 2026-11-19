@@ -66,6 +66,7 @@ Forwards `multipart/form-data` audio uploads (`file`, `model`, …) to connected
 |---|---|
 | `x-eay-skills` | Comma-separated skill names to inject into the system prompt (alternative to `model+skill` suffix) |
 | `x-eay-session-id` | Works with streaming and non-streaming requests. Persist and replay conversation history for this session id in SQLite. Sessions are private to the caller: each virtual key (and the no-key local caller) has its own namespace, so the same id under two keys is two different sessions |
+| `x-eay-project` | Run this request in a project (`prj_…`): the project's instructions are added as a system prompt, and the request, its subagents and their usage belong to the project. With a session id, the session is bound to the project on first use; sending a different project for that session later is `409`. A key linked to a project always uses that project, and naming another one is `403` |
 | `x-eay-team` | Use this roster. Send the team id (`tm_…`), or its name when exactly one team has that name. The speaker must be one of its agents (`model: agent/<lead>`), and `eay_delegate` may name only the other members. Sent with a session id, the session stores the team id. Renaming the team does not drop the chat. A new session id starts an empty chat on the same roster. Two sessions may use one roster and do not share messages |
 | `x-eay-run-id` | Your own id for this request (≤64 chars, `[A-Za-z0-9_-]`), so you can follow it on `/gateway/events` |
 | `x-eay-max-context-chars` | Trim older non-system messages when total characters exceed this limit |
@@ -96,6 +97,27 @@ accepted, as they come from this machine. A `gw-sk-…` key must exist and be en
 | `POST /gateway/keys` | `{"name":"ci","allowed_providers":["deepseek"],"rate_limit_per_min":30,"max_tokens_budget":100000,"max_cost_usd":5.0,"max_concurrent":4,"default_skills":["rust"],"tool_policy":{"mode":"read_only"}}` → returns the secret `key` once. `tool_policy` limits gateway-run MCP tools (see [Tool policies](#tool-policies)). `rate_limit_per_min` counts client requests (failover attempts and MCP tool rounds inside one request do not count extra). `max_concurrent` caps requests in flight at once (a streamed response holds its slot until it ends); over the cap → `429` |
 | `PATCH /gateway/keys/:id/toggle` | Enable / disable |
 | `DELETE /gateway/keys/:id` | Delete |
+
+### Projects
+
+A project is a container your app uses to group its work: keys, teams, sessions and usage share
+one id (`prj_…`). The gateway uses only `instructions`; `metadata` is yours (a repo path, a
+customer id, a tenant) and is stored as you send it.
+
+| Endpoint | |
+|---|---|
+| `GET /gateway/projects` | All projects |
+| `POST /gateway/projects` | `{"name":"Shop","instructions":"Answer in Indonesian.","metadata":{"repo":"/code/shop"}}` → `{"project":{"id":"prj_…",…}}`. `metadata` must be a JSON object (up to 64 KB); `instructions` up to 20 000 bytes |
+| `GET /gateway/projects/:id` | The project plus its `keys` (prefix only), `teams` and `sessions` |
+| `PUT /gateway/projects/:id` | Same body as create; the id and creation time stay |
+| `DELETE /gateway/projects/:id` | Deletes the project. Its keys, teams, sessions and usage are kept, unlinked |
+| `GET /gateway/projects/:id/usage` | `totals` (requests, tokens, cached tokens, estimated cost, errors) and per `models`, `agents` and `teams`. `?days=N` limits the range |
+| `PUT /gateway/keys/:id/project` | `{"project":"prj_…"}` links a key, `{"project":null}` unlinks it. Every request with that key then runs in the project |
+| `PUT /gateway/teams/:id/project` | Same, for a team. Editing the team later keeps the link |
+
+How a request finds its project, in order: the key's project, then `x-eay-project`, then the
+session's project. Subagents run in their parent's project. Requests made before a project existed
+are not counted toward it.
 
 ## Health
 

@@ -93,10 +93,12 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
         .filter(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .map(String::from);
     let team = headers.get("x-eay-team").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let project = headers.get("x-eay-project").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     ChatOptions {
         skills,
         session_id,
         team,
+        project,
         max_context_chars,
         redact_secrets,
         mcp_servers,
