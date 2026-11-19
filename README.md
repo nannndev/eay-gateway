@@ -28,7 +28,6 @@ The gateway sends each request to one of your connected accounts and automatical
 
 ```sh
 brew install nannndev/tap/eay-gateway && brew services start eay-gateway
-# or: docker run -d -p 127.0.0.1:20129:20129 -v eay-data:/data -e EAY_GATEWAY_ADMIN_TOKEN=change-me ghcr.io/nannndev/eay-gateway
 # or: download a binary from Releases, then `eay-gateway service install` to start it at login
 ```
 
@@ -51,7 +50,8 @@ claude
 ```
 
 Prebuilt binaries for macOS, Windows and Linux are on the
-[releases page](https://github.com/nannndev/eay-gateway/releases).
+[releases page](https://github.com/nannndev/eay-gateway/releases). For a home server, NAS or
+Raspberry Pi there is a Docker image: see [Getting started](docs/getting-started.md#on-a-server-nas-or-raspberry-pi-docker).
 
 ## Documentation
 

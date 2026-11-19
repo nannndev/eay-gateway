@@ -9,18 +9,6 @@ brew install nannndev/tap/eay-gateway
 brew services start eay-gateway     # start now and at login
 ```
 
-**Docker** (Linux amd64/arm64):
-
-```sh
-docker run -d --name eay-gateway -p 127.0.0.1:20129:20129 -v eay-data:/data \
-  -e EAY_GATEWAY_ADMIN_TOKEN=change-me ghcr.io/nannndev/eay-gateway
-```
-
-Inside a container no request looks like it comes from localhost, so the admin API needs
-`EAY_GATEWAY_ADMIN_TOKEN`. A `compose.yaml` is in the repo. Local (`stdio`) MCP servers that need
-`npx` or `uvx` won't run in this image; use remote (`http`) MCP servers there, or install
-natively.
-
 **Prebuilt binary:** download `eay-gateway-<platform>` from the
 [releases page](https://github.com/nannndev/eay-gateway/releases) and check it against `SHA256SUMS.txt`.
 
@@ -89,6 +77,37 @@ curl -X POST http://127.0.0.1:20129/gateway/admin/accounts/claude/start -H 'cont
 
 Some logins can be imported from a tool already signed in on this machine: the Codex CLI,
 the Kiro IDE, the Command Code CLI and MiMo Desktop. See [Providers](providers.md).
+
+## On a server, NAS or Raspberry Pi (Docker)
+
+On your own computer, use Homebrew or the binary above. Docker fits a gateway that runs on a home
+server, NAS or VPS and is shared by your machines or a team. It is also the way to run on Linux
+ARM (Raspberry Pi), which has no prebuilt binary yet.
+
+```sh
+docker run -d --name eay-gateway --restart unless-stopped \
+  -p 127.0.0.1:20129:20129 -v eay-data:/data \
+  -e EAY_GATEWAY_ADMIN_TOKEN=change-me ghcr.io/nannndev/eay-gateway
+```
+
+Or use `compose.yaml` from the repo with `EAY_GATEWAY_ADMIN_TOKEN` in a `.env` file. The image is
+`linux/amd64` and `linux/arm64`; data lives in the `/data` volume.
+
+What is different in a container:
+
+- **Admin token is required.** Nothing inside a container looks like localhost, so
+  `/gateway/admin/*` refuses requests without `EAY_GATEWAY_ADMIN_TOKEN`. Send it as
+  `Authorization: Bearer …` or `x-admin-token`.
+- **Browser logins need one extra step.** The login page sends you back to `http://localhost:<port>`
+  on your computer, not into the container. When the page fails to load, copy that URL from the
+  address bar and finish with `POST /gateway/admin/accounts/<provider>/complete`
+  (`{"session_id":"…","callback":"<the URL>"}`), or paste it into eay-console. Device logins
+  (enter a code on a website) work as usual.
+- **Local MCP servers don't run.** The image has no Node or Python, so `npx`/`uvx` servers fail.
+  Use remote (`http`) MCP servers, or run the gateway natively.
+- **Reaching it from other machines:** publish the port on all interfaces (`-p 20129:20129`) only
+  behind your firewall or a reverse proxy with TLS. Give each person a [virtual key](api.md#virtual-keys)
+  with its own limits.
 
 ## Use it from your tools
 
