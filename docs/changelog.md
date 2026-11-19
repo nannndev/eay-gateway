@@ -5,6 +5,7 @@ All notable changes to **eay-gateway** are listed below.
 ## v0.3.0 — 2026-11-19
 
 ### Highlights
+- **Agents that delegate:** a model can start its own subagents (`max_subagents`), with manual approval for tools that change things, and a sessions API to see what happened.
 - **Thinking everywhere:** reasoning effort and Claude thinking are translated for every provider; reasoning streams back to clients.
 - **Tool policies:** limit which MCP tools the gateway runs per agent or key (`read_only`, allow/deny lists).
 - **Easy install:** Homebrew, Docker image, and `eay-gateway service install` to start at login; new [Integrations](integrations.md) guide.

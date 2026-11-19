@@ -10,6 +10,9 @@ All notable changes to `eay-gateway` are documented in this file.
 - `x-eay-session-id` memory is private to each virtual key (and to the no-key local caller).
 
 ### Added
+- **Model-driven subagents:** with `tool_policy.max_subagents`, the model gets an `eay_delegate` tool to hand subtasks to subagents; they inherit a policy at least as strict as their parent's and stop at depth 3.
+- **Manual approval** for gateway-run tools: `tool_policy.approval` (`auto`, `manual`, `manual_for_writes`), `GET /gateway/admin/approvals`, `POST /gateway/admin/approvals/:id`; unanswered calls are denied after 5 minutes.
+- **Sessions API:** `GET /gateway/admin/sessions` and `GET /gateway/admin/sessions/:id` (messages and the session's subagents).
 - **Thinking / reasoning effort works with every provider:** Claude Code's `thinking`, OpenAI `reasoning_effort` and Codex `reasoning.effort` are translated for Claude, Codex, Gemini and OpenAI-compatible upstreams; reasoning streams back to clients, and Claude's signed thinking is replayed with tool results.
 - **Tool policies** for gateway-run MCP tools on agents and keys: `mode` (`all`, `read_only`, `none`), `allow` and `deny` lists; the stricter of agent and key wins.
 - **Install and run:** Homebrew formula (`brew install nannndev/tap/eay-gateway`), a container image on `ghcr.io/nannndev/eay-gateway` (amd64/arm64) with `compose.yaml`, and `eay-gateway service install|uninstall|status` to start at login on macOS, Linux and Windows. `--version` flag.

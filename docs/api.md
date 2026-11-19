@@ -175,13 +175,17 @@ Without a token, `/gateway/admin/*` and the `x-eay-mcp` header only work when th
 | `POST /gateway/admin/agents` | `{"name":"senior-rust","model":"auto/coding","skills":["rust"],"personality":"…","temperature":0.2,"tool_policy":{"allow":["github/*"]}}` (usable via `model: "agent/senior-rust"`) |
 | `PUT /gateway/admin/agents/:name` | Create or update agent by name |
 | `DELETE /gateway/admin/agents/:name` | Delete an agent profile |
+| `GET /gateway/admin/sessions` | Sessions, newest first: `id` (storage id), `session`, `owner` (`local` or `key:<id>`), message count, `updated_at`. `?limit=` (default 100) |
+| `GET /gateway/admin/sessions/:id` | One session's `messages` and the `subagents` that ran in it. Use the `id` from the list; a bare session name finds the local (no-key) one |
 | `DELETE /gateway/admin/sessions/:id` | Clear saved conversation history for a session id |
-| `GET /gateway/admin/events` | SSE stream of real-time request & subagent activity phases (`queued`, `preparing`, `routing`, `waiting_upstream`, `thinking`, `calling_tool`, `generating`, `failover`, `completed`, `failed`), including structured `meta` (`action`, `file`, `lines`, `added`, `removed`, `command`, `duration_ms`) |
+| `GET /gateway/admin/events` | SSE stream of real-time request & subagent activity phases (`queued`, `preparing`, `routing`, `waiting_upstream`, `thinking`, `calling_tool`, `awaiting_approval`, `approved`, `denied`, `generating`, `failover`, `completed`, `failed`, `cancelled`), including structured `meta` (`action`, `file`, `lines`, `added`, `removed`, `command`, `duration_ms`) |
 | `GET /gateway/admin/activity` | JSON snapshot of recent `events` and `subagents` |
 | `GET /gateway/admin/subagents` | List active and recent background subagent runs |
 | `POST /gateway/admin/subagents` | Spawn a background subagent `{"role":"Reviewer","model":"auto","prompt":"…","skills":[…],"mcp":["*"],"parent_id":"sub_…","api_key":"gw-sk-…"}`. `mcp` gives it MCP tools, `parent_id` links it into an agent tree, `api_key` (or header `x-eay-key`) makes it run under that key's budget and limits. At most 8 run at once; the rest wait in `queued` |
 | `GET /gateway/admin/subagents/:id` | Get subagent status and output. `?wait=60` long-polls up to that many seconds (max 300) until it finishes, so an orchestrator can join on a child |
 | `POST /gateway/admin/subagents/:id/cancel` | Stop a queued or running subagent (phase becomes `cancelled`) |
+| `GET /gateway/admin/approvals` | Tool calls waiting for a person: `id`, `run_id`, `agent`, `tool`, `arguments`, `expires_at` |
+| `POST /gateway/admin/approvals/:id` | `{"approve": true}` or `false`. `404` if already answered or expired |
 | `DELETE /gateway/admin/subagents/:id` | Cancel it if still running and remove it from history |
 | `GET /gateway/admin/mcp` | List registered external MCP servers (`stdio` / `http`) |
 | `POST /gateway/admin/mcp` | Save an MCP server (`{"name":"notion","transport":"http","url":"https://mcp.notion.com/mcp","headers":{"Authorization":"Bearer …"}}` or `stdio` with `command`, `args`, `env`) |
@@ -208,6 +212,28 @@ Cursor) are not affected; their permission modes stay in the client.
 | `mode` | `all` (default), `read_only` (only tools the server marks `readOnlyHint`), or `none` |
 | `allow` | If set, only matching tools are offered: `server/tool`, `server/*`, or a bare `tool` name |
 | `deny` | Matching tools are never offered |
+| `approval` | `auto` (default) runs tools at once; `manual` waits for a person to approve every call; `manual_for_writes` waits only for tools the server does not mark read-only |
+| `max_subagents` | Lets the model start subagents with the `eay_delegate` tool, up to this many per request. Unset or 0: off |
+
+#### Approval
+
+A tool call that needs approval stops and emits an `awaiting_approval` event with the approval
+`id`. Answer it with `POST /gateway/admin/approvals/:id` (eay-console shows Approve/Deny buttons).
+With no answer in 5 minutes it counts as denied, and the model is told not to retry. The request
+stays open while it waits, so approval fits subagents and background jobs best; an interactive
+client may time out first.
+
+#### Subagents started by the model
+
+With `max_subagents` set, the model gets an `eay_delegate` tool (`role`, `task`, optional `model`).
+Calling it starts a subagent, waits for it (up to 10 minutes) and returns its answer as the tool
+result. Subagents:
+
+- run under the same key, so its budget and limits apply;
+- get a policy at least as strict as their parent's (strictest mode and approval, intersected
+  `allow`, all `deny`), and may lower the subagent budget but never raise it;
+- stop at three levels deep;
+- appear in `GET /gateway/admin/subagents` with `parent_id` set to the run that started them.
 
 When both the agent and the key have a policy, a tool must pass both. Disallowed tools are left
 out of the request, and a call to one anyway is refused. `read_only` relies on the MCP server's own

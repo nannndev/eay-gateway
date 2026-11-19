@@ -189,6 +189,18 @@ curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: appli
 }'
 ```
 
+Let a model split work by itself: give its agent a subagent budget, and it gets an
+`eay_delegate` tool. Add approval so it cannot change anything without you:
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' -d '{
+  "name": "lead", "model": "auto",
+  "tool_policy": { "max_subagents": 3, "approval": "manual_for_writes" }
+}'
+```
+
+Pending approvals show up at `GET /gateway/admin/approvals` and in eay-console's Activity tab.
+
 The admin API runs background agents for you:
 
 ```sh
