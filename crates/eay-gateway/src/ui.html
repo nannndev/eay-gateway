@@ -295,7 +295,24 @@
           <input id="sub-skills" placeholder="Skills, comma-separated" class="grow" />
         </div>
         <textarea id="sub-prompt" placeholder="What should the subagent do?"></textarea>
-        <div class="row" style="margin-top:10px"><button class="btn" onclick="spawnSubagent()">Spawn subagent</button></div>
+        <details class="sub" style="margin-top:8px">
+          <summary>Tools, limits and parent</summary>
+          <div class="row" style="margin-top:8px">
+            <label class="field grow">MCP servers (none selected = no tools)
+              <select id="sub-mcp" multiple size="3"></select>
+            </label>
+            <label class="field grow">Run under key (its budget and limits apply)
+              <input id="sub-key" type="password" placeholder="gw-sk-… (optional)" />
+            </label>
+            <label class="field grow">Parent run id
+              <input id="sub-parent" placeholder="sub_… or req_… (optional)" />
+            </label>
+          </div>
+        </details>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" onclick="spawnSubagent()">Spawn subagent</button>
+          <span class="hint">Up to 8 run at once; the rest wait as queued.</span>
+        </div>
       </div>
       <div class="card">
         <h2>Subagents <button class="ghost" onclick="loadSubagents()">Refresh</button></h2>
@@ -647,6 +664,7 @@
           <input id="key-rpm" type="number" min="1" placeholder="Requests / min" style="width:130px" />
           <input id="key-tok" type="number" min="1" placeholder="Token budget" style="width:125px" />
           <input id="key-usd" type="number" step="0.01" min="0" placeholder="USD budget" style="width:115px" />
+          <input id="key-conc" type="number" min="1" placeholder="In flight at once" style="width:140px" title="Requests this key may run at the same time (agents fanning out). Empty = unlimited." />
         </div>
         <div class="row" style="margin-top:8px">
           <input id="key-providers" placeholder="Allowed providers, comma-separated (empty = all)" class="grow" />
@@ -850,14 +868,17 @@
       ].filter(Boolean).join(' ');
       return `<tr>
         <td class="mono">${fmtTime(ev.ts)}</td>
-        <td><span class="pill ${ev.phase === 'failed' ? 'bad' : ev.phase === 'completed' ? '' : 'on'}">${esc(ev.phase)}</span></td>
+        <td>${phasePill(ev.phase)}</td>
         <td class="mono">${esc(ev.agent || ev.id)}</td>
         <td class="mono">${esc(ev.target || '–')}</td>
         <td class="mono">${esc(ev.message)} ${extra}</td>
       </tr>`;
     }).join('') || emptyRow(5, 'Waiting for requests…');
-    const live = new Set(activityEvents.filter((e) => Date.now() / 1000 - e.ts < 30 && !['completed', 'failed'].includes(e.phase)).map((e) => e.id));
-    $('#nav-live').textContent = live.size ? `${live.size} live` : '';
+    // A run is live if its newest event (events are newest-first) is recent and not a final phase.
+    const latest = new Map();
+    activityEvents.forEach((e) => { if (!latest.has(e.id)) latest.set(e.id, e); });
+    const live = [...latest.values()].filter((e) => Date.now() / 1000 - e.ts < 30 && !FINISHED.includes(e.phase));
+    $('#nav-live').textContent = live.length ? `${live.length} live` : '';
   }
   async function connectActivity() {
     activityAbort = new AbortController();
@@ -883,25 +904,40 @@
   }
   function restartActivity() { activityAbort?.abort(); connectActivity(); }
 
+  const FINISHED = ['completed', 'failed', 'cancelled'];
+  const phasePill = (p) => `<span class="pill ${p === 'failed' ? 'bad' : FINISHED.includes(p) ? '' : 'on'}">${esc(p)}</span>`;
   async function loadSubagents() {
     renderActivity();
-    const r = await api('/gateway/admin/subagents');
+    const [r, m] = await Promise.all([api('/gateway/admin/subagents'), api('/gateway/admin/mcp')]);
+    const sel = $('#sub-mcp');
+    const picked = new Set([...sel.selectedOptions].map((o) => o.value));
+    sel.innerHTML = (m.data?.mcp_servers || []).filter((x) => x.enabled)
+      .map((x) => `<option value="${esc(x.name)}" ${picked.has(x.name) ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
     $('#subagents-body').innerHTML = (r.data?.subagents || []).map((s) => `
       <tr>
-        <td>${esc(s.role)}</td>
-        <td><span class="pill ${s.phase === 'failed' ? 'bad' : s.phase === 'completed' ? '' : 'on'}">${esc(s.phase)}</span></td>
+        <td>${esc(s.role)}${s.parent_id ? `<div class="mono dim">↳ ${esc(s.parent_id)}</div>` : ''}<div class="mono dim">${esc(s.id)}</div></td>
+        <td>${phasePill(s.phase)}</td>
         <td class="mono">${esc(s.status_message)}</td>
         <td class="mono">${esc(s.target || s.model)}</td>
         <td class="mono"><details class="sub"><summary>${esc((s.output || s.error || '–').slice(0, 60))}</summary><pre>${esc(s.output || s.error || '')}</pre></details></td>
-        <td class="actions"><button class="ghost danger" onclick="deleteSubagent(${attr(s.id)})">Delete</button></td>
+        <td class="actions">
+          ${FINISHED.includes(s.phase) ? '' : `<button class="ghost" onclick="cancelSubagent(${attr(s.id)})">Cancel</button>`}
+          <button class="ghost" onclick="$('#sub-parent').value=${attr(s.id)};$('#sub-role').focus()">Spawn child</button>
+          <button class="ghost danger" onclick="deleteSubagent(${attr(s.id)})">Delete</button>
+        </td>
       </tr>`).join('') || emptyRow(6, 'No subagents yet. Spawn one above.');
   }
   async function spawnSubagent() {
     const body = { role: $('#sub-role').value.trim(), model: $('#sub-model').value.trim() || 'auto', skills: csv($('#sub-skills').value), prompt: $('#sub-prompt').value.trim() };
     if (!body.role || !body.prompt) return toast('Add a role and a task first.', true);
+    const mcp = [...$('#sub-mcp').selectedOptions].map((o) => o.value);
+    if (mcp.length) body.mcp = mcp;
+    const key = $('#sub-key').value.trim(); if (key) body.api_key = key;
+    const parent = $('#sub-parent').value.trim(); if (parent) body.parent_id = parent;
     const r = await act(api('/gateway/admin/subagents', { method: 'POST', body }), 'Subagent started', loadSubagents);
-    if (r.ok) $('#sub-prompt').value = '';
+    if (r.ok) { $('#sub-prompt').value = ''; $('#sub-parent').value = ''; }
   }
+  const cancelSubagent = (id) => act(api(`/gateway/admin/subagents/${encodeURIComponent(id)}/cancel`, { method: 'POST' }), 'Subagent cancelled', loadSubagents);
   const deleteSubagent = (id) => act(api(`/gateway/admin/subagents/${encodeURIComponent(id)}`, { method: 'DELETE' }), null, loadSubagents);
 
   // ---- Providers --------------------------------------------------------------
@@ -1319,13 +1355,14 @@
       const used = (k.total_input_tokens || 0) + (k.total_output_tokens || 0);
       const limits = [
         k.rate_limit_per_min ? `${k.rate_limit_per_min}/min` : '',
+        k.max_concurrent ? `${k.max_concurrent} at once` : '',
         k.max_tokens_budget ? `${fmtN(used)} / ${fmtN(k.max_tokens_budget)} tok` : '',
         k.max_cost_usd ? `$${k.max_cost_usd}` : '',
         k.allowed_providers?.length ? `only ${k.allowed_providers.join(', ')}` : '',
       ].filter(Boolean).join(' · ') || 'none';
       return `<tr>
         <td>${esc(k.name)}</td>
-        <td class="mono">${esc(k.key_prefix)}…</td>
+        <td class="mono">${esc(k.key_prefix)}</td>
         <td class="mono">${fmtN(k.total_requests)}</td>
         <td class="mono">${fmtN(used)}</td>
         <td class="mono dim">${esc(limits)}</td>
@@ -1342,6 +1379,7 @@
     const providers = csv($('#key-providers').value); const skills = csv($('#key-skills').value);
     const body = {
       name: $('#key-name').value.trim() || 'default', rate_limit_per_min: num('#key-rpm'), max_tokens_budget: num('#key-tok'), max_cost_usd: num('#key-usd'),
+      max_concurrent: num('#key-conc'),
       allowed_providers: providers.length ? providers : null, default_skills: skills.length ? skills : null,
     };
     const r = await act(api('/gateway/admin/keys', { method: 'POST', body }), 'Key created', loadKeys);
@@ -1420,7 +1458,7 @@
   traceListeners.add((ev) => {
     if (!trace || ev.id !== trace.runId) return;
     const at = performance.now() - trace.t0;
-    if (ev.phase === 'failed') { trace.failed = ev.message; trace.current = null; }
+    if (ev.phase === 'failed' || ev.phase === 'cancelled') { trace.failed = ev.message; trace.current = null; }
     else {
       trace.hits[ev.phase] = trace.hits[ev.phase] || { at, message: ev.message };
       trace.hits[ev.phase].message = ev.message;
