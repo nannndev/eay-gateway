@@ -44,6 +44,16 @@ async fn chat(State(seen): State<Seen>, Json(body): Json<Value>) -> Response {
     let user_text =
         body["messages"].as_array().and_then(|m| m.iter().find(|m| m["role"] == "user")).and_then(|m| m["content"].as_str()).unwrap_or("");
     // A subagent answers directly (it may be offered `delegate` too, but does not use it).
+    if user_text.starts_with("SLOW:") && tool_result.is_none() {
+        // A subagent that takes a while: parallel delegation must overlap these.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let name = user_text.trim_start_matches("SLOW:").trim().to_string();
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "content": format!("done {name}") }), Some("stop"))]),
+        )
+            .into_response();
+    }
     if user_text.starts_with("SUB:") && tool_result.is_none() {
         return (
             [("content-type", "text/event-stream")],
@@ -54,6 +64,42 @@ async fn chat(State(seen): State<Seen>, Json(body): Json<Value>) -> Response {
     let mcp_tool = body["tools"]
         .as_array()
         .and_then(|t| t.iter().find_map(|t| t["function"]["name"].as_str().filter(|n| n.starts_with("mcp__") || *n == "eay_delegate")));
+    // "FANOUT" hands three slow subtasks out in one reply, the third to the saved agent "tester".
+    if mcp_tool == Some("eay_delegate") && tool_result.is_none() && user_text.starts_with("FANOUT") {
+        let calls: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let mut args = json!({ "role": format!("Worker {n}"), "task": format!("SLOW: {n}") });
+                if *n == "c" {
+                    args["agent"] = json!("tester");
+                }
+                json!({ "index": i, "id": format!("call_{n}"), "type": "function", "function": { "name": "eay_delegate", "arguments": args.to_string() } })
+            })
+            .collect();
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "tool_calls": calls }), Some("tool_calls"))]),
+        )
+            .into_response();
+    }
+    if mcp_tool == Some("eay_delegate")
+        && body["messages"].as_array().is_some_and(|m| m.iter().filter(|m| m["role"] == "tool").count() == 3)
+    {
+        // The lead reports what its three workers said, in call order.
+        let outs: Vec<String> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or("").to_string())
+            .collect();
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "content": outs.join(" | ") }), Some("stop"))]),
+        )
+            .into_response();
+    }
     if mcp_tool == Some("eay_delegate") && tool_result.is_none() && !user_text.starts_with("SUB:") {
         // "LOOP" keeps delegating at every level; anything else delegates once.
         let task = if user_text.starts_with("LOOP") { "LOOP" } else { "SUB: do part one" };
@@ -563,4 +609,73 @@ async fn manual_approval_holds_a_tool_until_someone_answers() {
             StatusCode::NOT_FOUND
         );
     }
+}
+
+#[tokio::test]
+async fn a_lead_runs_its_subagents_in_parallel_and_can_use_saved_agents() {
+    let gw = gateway(false).await;
+    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[])
+        .await;
+    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "tester", "model": "auto", "description": "Writes tests" }), &[]).await;
+
+    let t0 = std::time::Instant::now();
+    let (st, body) = post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "agent/lead", "messages": [{ "role": "user", "content": "FANOUT" }] }),
+        &[],
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"], "done a | done b | done c");
+    // Three 400 ms subagents: about 0.4 s in parallel, 1.2 s or more if they ran one after another.
+    assert!(elapsed < std::time::Duration::from_millis(1000), "subagents did not overlap: {elapsed:?}");
+
+    // The lead was told which saved agents exist, and the third worker ran as agent/tester.
+    let lead_req = gw
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|b| {
+            b["messages"][0]["content"].as_str().is_some_and(|c| c.contains("FANOUT"))
+                || b["messages"].as_array().is_some_and(|m| m.iter().any(|m| m["content"] == "FANOUT"))
+        })
+        .cloned()
+        .unwrap();
+    let delegate = lead_req["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "eay_delegate").unwrap().clone();
+    assert!(delegate["function"]["description"].as_str().unwrap().contains("tester: Writes tests"), "{delegate}");
+    assert_eq!(delegate["function"]["parameters"]["properties"]["agent"]["enum"], json!(["tester"]));
+
+    // The tree endpoint nests the three workers under the lead's request, in start order.
+    let (_, tree) = get_json(&gw.app, "/gateway/admin/subagents/tree").await;
+    let roots = tree["tree"].as_array().unwrap();
+    assert_eq!(roots.len(), 3, "workers are roots: their parent is the lead's request, not a subagent run");
+    let models: Vec<&str> = roots.iter().filter_map(|r| r["model"].as_str()).collect();
+    assert!(models.contains(&"agent/tester"), "{models:?}");
+    assert!(roots.iter().all(|r| r["children"].as_array().unwrap().is_empty()));
+}
+
+#[tokio::test]
+async fn the_tree_nests_children_under_their_parent_run() {
+    let gw = gateway(false).await;
+    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[])
+        .await;
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/loop", "messages": [{ "role": "user", "content": "LOOP" }] }), &[])
+        .await;
+    let (_, tree) = get_json(&gw.app, "/gateway/admin/subagents/tree").await;
+    let roots = tree["tree"].as_array().unwrap();
+    assert_eq!(roots.len(), 1, "{tree}");
+    // sub → sub → sub: three levels, one child each.
+    let mut depth = 0;
+    let mut node = &roots[0];
+    loop {
+        depth += 1;
+        match node["children"].as_array().unwrap().first() {
+            Some(c) => node = c,
+            None => break,
+        }
+    }
+    assert_eq!(depth, 3);
 }

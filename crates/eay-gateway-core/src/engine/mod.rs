@@ -58,21 +58,33 @@ pub const DELEGATE_TOOL: &str = "eay_delegate";
 /// Deepest chain of subagents a model may build with `delegate`.
 pub const MAX_DELEGATE_DEPTH: u32 = 3;
 
-fn delegate_tool_schema() -> Value {
+/// The `eay_delegate` tool. `agents` are the saved agent profiles the model may hand work to
+/// (name, description); they are listed so the model knows which specialists exist.
+fn delegate_tool_schema(agents: &[(String, String)]) -> Value {
+    let mut description = String::from(
+        "Hand an independent subtask to a subagent and get its final answer back. Use it for work that can be done separately (research one topic, review one file). Call it several times in one reply to run subtasks at the same time. Give the subagent everything it needs in `task`; it cannot see this conversation.",
+    );
+    let mut props = json!({
+        "role": { "type": "string", "description": "Short role, e.g. 'Test writer'" },
+        "task": { "type": "string", "description": "Complete instructions for the subagent" },
+        "model": { "type": "string", "description": "Optional model id; defaults to this request's model" }
+    });
+    if !agents.is_empty() {
+        description.push_str(
+            "\n\nSaved agents you can hand work to with `agent` (each brings its own model, skills, personality and tool limits):",
+        );
+        for (name, desc) in agents {
+            description.push_str(&format!("\n- {name}{}", if desc.is_empty() { String::new() } else { format!(": {desc}") }));
+        }
+        let names: Vec<&str> = agents.iter().map(|(n, _)| n.as_str()).collect();
+        props["agent"] = json!({ "type": "string", "enum": names, "description": "Optional saved agent to run the subtask as" });
+    }
     json!({
         "type": "function",
         "function": {
             "name": DELEGATE_TOOL,
-            "description": "Hand an independent subtask to a subagent and get its final answer back. Use it for work that can be done separately (research one topic, review one file). Give the subagent everything it needs in `task`; it cannot see this conversation.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "role": { "type": "string", "description": "Short role, e.g. 'Test writer'" },
-                    "task": { "type": "string", "description": "Complete instructions for the subagent" },
-                    "model": { "type": "string", "description": "Optional model id; defaults to this request's model" }
-                },
-                "required": ["role", "task"]
-            }
+            "description": description,
+            "parameters": { "type": "object", "properties": props, "required": ["role", "task"] }
         }
     })
 }
@@ -487,6 +499,8 @@ impl GatewayEngine {
         let mut base_model = parsed_model.to_string();
         let mut combined_skills: Vec<String> = Vec::new();
         let mut agent_personality: Option<(String, String)> = None;
+        // The agent profile this request runs as, with or without a personality.
+        let mut running_agent: Option<String> = None;
         let mut agent_tool_policy = crate::mcp::ToolPolicy::default();
 
         if let Some(agent_name) = base_model.strip_prefix("agent/") {
@@ -496,6 +510,7 @@ impl GatewayEngine {
                 .filter(|a| a.enabled)
                 .ok_or_else(|| gateway_err(404, format!("Agent profile '{agent_name}' not found or disabled")))?;
             base_model = agent.model.clone();
+            running_agent = Some(agent.name.clone());
             combined_skills.extend(agent.skills);
             agent_tool_policy = agent.tool_policy.clone();
             if !agent.personality.is_empty() {
@@ -595,7 +610,17 @@ impl GatewayEngine {
             let mut merged_tools = body.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default();
             let mut mcp_index = crate::mcp::McpToolIndex::default();
             if delegate_budget > 0 {
-                merged_tools.push(delegate_tool_schema());
+                // Offer saved agents other than the one running now (an agent can still delegate to itself by model).
+                let current = running_agent.clone().unwrap_or_default();
+                let agents: Vec<(String, String)> = self
+                    .store
+                    .list_agents()
+                    .into_iter()
+                    .filter(|a| a.enabled && a.name != current)
+                    .take(30)
+                    .map(|a| (a.name, a.description))
+                    .collect();
+                merged_tools.push(delegate_tool_schema(&agents));
             }
             let mut delegated: u32 = 0;
             // What a subagent started here may do: the strictest of everything above, one level deeper.
@@ -647,28 +672,47 @@ impl GatewayEngine {
                         msgs.push(msg.clone());
                         // Tool messages are text-only in chat/completions; images follow as one user turn.
                         let mut tool_images: Vec<Value> = Vec::new();
+                        // All `eay_delegate` calls in this turn run at the same time (the subagent slot
+                        // pool still caps how many are active); results keep the model's call order.
+                        let delegate_calls: Vec<(String, Value)> = mcp_calls
+                            .iter()
+                            .filter(|tc| tc["function"]["name"] == DELEGATE_TOOL)
+                            .map(|tc| {
+                                let args = serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
+                                (tc["id"].as_str().unwrap_or("").to_string(), args)
+                            })
+                            .collect();
+                        let mut delegate_outputs: HashMap<String, String> = HashMap::new();
+                        let mut runs = Vec::new();
+                        for (call_id, args) in &delegate_calls {
+                            if delegated >= delegate_budget {
+                                delegate_outputs.insert(
+                                    call_id.clone(),
+                                    format!("Subagent limit reached ({delegate_budget} per request). Do the rest yourself."),
+                                );
+                                continue;
+                            }
+                            delegated += 1;
+                            let fut = self.run_delegate(
+                                key.clone(),
+                                args,
+                                &req_model,
+                                &run_id,
+                                agent_label.as_deref(),
+                                &child_policy,
+                                opts.depth,
+                                &opts.mcp_servers,
+                            );
+                            runs.push(async move { (call_id.clone(), fut.await) });
+                        }
+                        delegate_outputs.extend(futures::future::join_all(runs).await);
                         for tc in mcp_calls {
                             let call_id = tc["id"].as_str().unwrap_or("");
                             let full_name = tc["function"]["name"].as_str().unwrap_or("");
                             let args: Value =
                                 serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
                             if full_name == DELEGATE_TOOL {
-                                let output = if delegated >= delegate_budget {
-                                    format!("Subagent limit reached ({delegate_budget} per request). Do the rest yourself.")
-                                } else {
-                                    delegated += 1;
-                                    self.run_delegate(
-                                        key.clone(),
-                                        &args,
-                                        &req_model,
-                                        &run_id,
-                                        agent_label.as_deref(),
-                                        &child_policy,
-                                        opts.depth,
-                                        &opts.mcp_servers,
-                                    )
-                                    .await
-                                };
+                                let output = delegate_outputs.remove(call_id).unwrap_or_default();
                                 msgs.push(json!({ "role": "tool", "tool_call_id": call_id, "content": output }));
                                 continue;
                             }
@@ -1056,7 +1100,15 @@ impl GatewayEngine {
             return "delegate needs a non-empty `task`.".into();
         }
         let role = args["role"].as_str().filter(|r| !r.trim().is_empty()).unwrap_or("Subagent").to_string();
-        let model = args["model"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or(default_model).to_string();
+        // A saved agent brings its own model, skills, personality and tool policy; its policy still
+        // applies on top of the parent's, so it can never get more than the parent had.
+        let model = match args["agent"].as_str().map(str::trim).filter(|a| !a.is_empty()) {
+            Some(agent) => match self.store.get_agent(agent).filter(|a| a.enabled) {
+                Some(_) => format!("agent/{agent}"),
+                None => return format!("No enabled agent named '{agent}'."),
+            },
+            None => args["model"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or(default_model).to_string(),
+        };
         let opts = ChatOptions {
             mcp_servers: mcp_servers.to_vec(),
             inherited_policy: Some(child_policy.clone()),
@@ -1329,6 +1381,23 @@ mod tests {
         let approved = e.activity.request_approval_for("r", None, None, "t", json!({}), std::time::Duration::from_millis(50)).await;
         assert!(!approved);
         assert!(e.activity.list_approvals().is_empty(), "expired approvals are removed");
+    }
+
+    #[test]
+    fn the_run_tree_nests_by_parent_and_treats_unknown_parents_as_roots() {
+        let (e, _d) = engine();
+        let h = &e.activity;
+        h.create_run_with("a".into(), None, "lead".into(), "auto".into(), Some("req_1".into()), None);
+        h.create_run_with("b".into(), None, "child 1".into(), "auto".into(), Some("a".into()), None);
+        h.create_run_with("c".into(), None, "child 2".into(), "auto".into(), Some("a".into()), None);
+        h.create_run_with("d".into(), None, "grandchild".into(), "auto".into(), Some("b".into()), None);
+        h.create_run_with("z".into(), None, "other".into(), "auto".into(), None, None);
+        let tree = h.run_tree();
+        assert_eq!(tree.len(), 2, "a (parent is a request) and z are roots");
+        let a = tree.iter().find(|n| n["id"] == "a").unwrap();
+        let kids: Vec<&str> = a["children"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+        assert_eq!(kids, ["b", "c"], "children in start order");
+        assert_eq!(a["children"][0]["children"][0]["id"], "d");
     }
 
     /// OpenAI (with one custom model) and DeepSeek connected by API key.

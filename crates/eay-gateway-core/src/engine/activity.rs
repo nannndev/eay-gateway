@@ -369,6 +369,35 @@ impl ActivityHub {
         out
     }
 
+    /// Runs as a forest: every run whose parent is not itself a known run becomes a root (its
+    /// parent is a client request or nothing), and children nest under `children`. Newest roots
+    /// first, children in start order, so the tree reads like the order work was handed out.
+    pub fn run_tree(&self) -> Vec<Value> {
+        let runs = self.list_runs();
+        let ids: std::collections::HashSet<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        let mut children: HashMap<&str, Vec<&SubagentRun>> = HashMap::new();
+        for r in &runs {
+            if let Some(p) = r.parent_id.as_deref().filter(|p| ids.contains(p)) {
+                children.entry(p).or_default().push(r);
+            }
+        }
+        for v in children.values_mut() {
+            v.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        fn node(r: &SubagentRun, children: &HashMap<&str, Vec<&SubagentRun>>, depth: usize) -> Value {
+            let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
+            // Depth is bounded by the delegate limit; the guard only protects against bad data.
+            let kids: Vec<Value> = if depth < 16 {
+                children.get(r.id.as_str()).map(|c| c.iter().map(|k| node(k, children, depth + 1)).collect()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            v["children"] = Value::Array(kids);
+            v
+        }
+        runs.iter().filter(|r| !r.parent_id.as_deref().is_some_and(|p| ids.contains(p))).map(|r| node(r, &children, 0)).collect()
+    }
+
     pub fn get_run(&self, id: &str) -> Option<SubagentRun> {
         self.runs.lock().get(id).cloned()
     }

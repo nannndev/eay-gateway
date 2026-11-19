@@ -569,6 +569,11 @@ pub struct SpawnSubagentPayload {
     api_key: Option<String>,
 }
 
+/// Subagents as a parent/child tree (`children` nested), for team views.
+pub async fn handle_subagent_tree(State(engine): State<GatewayEngine>) -> Json<Value> {
+    Json(json!({ "tree": engine.activity.run_tree() }))
+}
+
 pub async fn handle_list_subagents(State(engine): State<GatewayEngine>) -> Json<Value> {
     Json(json!({ "subagents": engine.activity.list_runs() }))
 }

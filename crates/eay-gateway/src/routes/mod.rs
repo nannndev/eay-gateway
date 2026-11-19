@@ -251,6 +251,7 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/events", get(admin::handle_activity_events))
         .route("/gateway/admin/activity", get(admin::handle_activity_snapshot))
         .route("/gateway/admin/subagents", get(admin::handle_list_subagents).post(admin::handle_spawn_subagent))
+        .route("/gateway/admin/subagents/tree", get(admin::handle_subagent_tree))
         .route("/gateway/admin/subagents/:id", get(admin::handle_get_subagent).delete(admin::handle_delete_subagent))
         .route("/gateway/admin/subagents/:id/cancel", post(admin::handle_cancel_subagent))
         .route("/gateway/admin/approvals", get(admin::handle_list_approvals))
