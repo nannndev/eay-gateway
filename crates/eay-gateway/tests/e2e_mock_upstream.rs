@@ -22,6 +22,11 @@ use tower::ServiceExt;
 /// Every request body the fake upstream received, newest last.
 type Seen = Arc<Mutex<Vec<Value>>>;
 
+/// Slow subagents in flight right now, and the most there have ever been at once. Counting overlap
+/// (instead of timing the request) proves parallelism on a slow CI machine too.
+static SLOW_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SLOW_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn sse(chunks: &[Value]) -> String {
     let mut s: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
     s.push_str("data: [DONE]\n\n");
@@ -46,7 +51,11 @@ async fn chat(State(seen): State<Seen>, Json(body): Json<Value>) -> Response {
     // A subagent answers directly (it may be offered `delegate` too, but does not use it).
     if user_text.starts_with("SLOW:") && tool_result.is_none() {
         // A subagent that takes a while: parallel delegation must overlap these.
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = SLOW_ACTIVE.fetch_add(1, SeqCst) + 1;
+        SLOW_PEAK.fetch_max(now, SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        SLOW_ACTIVE.fetch_sub(1, SeqCst);
         let name = user_text.trim_start_matches("SLOW:").trim().to_string();
         return (
             [("content-type", "text/event-stream")],
@@ -618,7 +627,6 @@ async fn a_lead_runs_its_subagents_in_parallel_and_can_use_saved_agents() {
         .await;
     post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "tester", "model": "auto", "description": "Writes tests" }), &[]).await;
 
-    let t0 = std::time::Instant::now();
     let (st, body) = post_raw(
         &gw.app,
         "/v1/chat/completions",
@@ -626,11 +634,10 @@ async fn a_lead_runs_its_subagents_in_parallel_and_can_use_saved_agents() {
         &[],
     )
     .await;
-    let elapsed = t0.elapsed();
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"], "done a | done b | done c");
-    // Three 400 ms subagents: about 0.4 s in parallel, 1.2 s or more if they ran one after another.
-    assert!(elapsed < std::time::Duration::from_millis(1000), "subagents did not overlap: {elapsed:?}");
+    // All three subagents were in flight at the same moment (each waits 400 ms in the mock).
+    assert_eq!(SLOW_PEAK.load(std::sync::atomic::Ordering::SeqCst), 3, "subagents did not run in parallel");
 
     // The lead was told which saved agents exist, and the third worker ran as agent/tester.
     let lead_req = gw
