@@ -2,6 +2,36 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
+## [Unreleased]
+
+### Security
+- Without an admin token, `/gateway/admin/*` and the `x-eay-mcp` header only accept loopback `Host` headers. This blocks DNS rebinding from a web page, which could otherwise register a local (stdio) MCP server and run a command.
+- Admin token is compared in constant time. New read-only admin token (`--admin-read-token` / `EAY_GATEWAY_ADMIN_READ_TOKEN`) that can only make `GET` requests.
+- `x-eay-session-id` memory is private to each virtual key (and to the no-key local caller).
+
+### Added
+- Per-key `max_concurrent` (requests in flight; streamed responses hold their slot until they end).
+- Subagents: `POST /gateway/admin/subagents/:id/cancel`, `GET …/:id?wait=N` to join on a run, `parent_id`, `mcp`, `api_key` (runs under that key's limits), at most 8 running at once, history kept across restarts.
+- `x-eay-run-id` header to follow your own request on `/gateway/admin/events`.
+- MCP: `POST /gateway/admin/mcp/import` (Claude Desktop / Claude Code / Cursor / VS Code configs), `POST /gateway/admin/mcp/:name/call` to run one tool directly.
+- Web console rebuilt around every API, with a streaming playground (three protocols, attachments, live route trace, embeddings/image/speech/transcription).
+- End-to-end tests against a mock upstream and mock MCP servers.
+
+### Changed
+- `/v1/responses` streams real Responses events (text, function calls, usage) and forwards function tools, `tool_choice` and `function_call` history, so Codex CLI tool use works through the gateway.
+- Local MCP servers stay running between calls (stateful servers keep their state); remote ones reuse their `mcp-session-id`. Tool lists are cached.
+- MCP tool names over 64 characters are shortened to a stable form; image results reach the model as images; errors include the server's stderr.
+- `rate_limit_per_min` counts client requests, not failover attempts.
+- Request body limit raised from 2 MB to 64 MB. Upstreams silent for 300 s are cut off; connect timeout 10 s.
+- `~` in MCP commands and arguments expands to the home folder.
+
+### Fixed
+- Session memory is now saved for streamed replies (it only worked for non-streaming requests).
+
+### Upgrade notes
+- Sessions saved before this version are not loaded any more (they were not tied to a key). Delete them with `DELETE /gateway/admin/sessions/:id`.
+- If you reach the admin API through a hostname other than `localhost`/`127.0.0.1` without `--admin-token`, it now returns `403`. Set an admin token.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added

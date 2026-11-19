@@ -57,12 +57,13 @@ One SQLite file, `gateway.db`:
 |---|---|
 | `providers` | API-key providers: encrypted main key, base URL, enabled, custom models, synced models + time, last check |
 | `accounts` | Subscription accounts and extra API keys: provider, label, email, encrypted credential JSON, order, enabled, last error |
-| `usage` | One row per attempt: provider, model, tokens (input, output, cached), cost, duration, status, virtual key |
-| `keys` | Virtual keys: SHA-256 of the secret, limits, budgets (`max_tokens_budget`, `max_cost_usd`), `default_skills`, totals |
+| `usage` | One row per attempt (failover attempts included): provider, model, tokens (input, output, cached), cost, duration, status, virtual key |
+| `keys` | Virtual keys: SHA-256 of the secret, limits, budgets (`max_tokens_budget`, `max_cost_usd`), `max_concurrent`, `default_skills`, totals |
 | `combos` | Combo name → JSON list of targets |
 | `skills` | Context/Skill presets: name, description, prompt, enabled |
 | `agents` | Agent Personality profiles: model, skills, personality, temperature, max_tokens |
-| `sessions` | Conversation memory keyed by `x-eay-session-id` |
+| `sessions` | Conversation memory: `key:<key-id>:<session>` for virtual keys, `local:<session>` without a key |
+| `subagent_runs` | Finished subagent runs (newest 500), restored into memory at startup |
 | `mcp_servers` | External MCP connectors (`stdio` command/args/env or `http` url/headers) |
 | `settings` | Routing settings, Gemini OAuth client |
 
@@ -71,7 +72,8 @@ Schema changes are additive (`ALTER TABLE … ADD COLUMN`, errors ignored), so o
 upgrade in place.
 
 In memory only: cooldowns, round-robin cursors, the fill-first "last good account", the quota
-cache and pending OAuth sessions.
+cache, pending OAuth sessions, per-key rate-limit windows and in-flight counts, running subagents,
+live MCP processes and HTTP MCP sessions, and the MCP tool-list cache.
 
 ## Embedding the core in Rust
 

@@ -2,6 +2,19 @@
 
 All notable changes to **eay-gateway** are listed below.
 
+## Unreleased
+
+### Highlights
+- **Safer by default:** admin API and MCP tools are loopback-only without an admin token (blocks DNS rebinding); new read-only admin token; session memory is private per key.
+- **Codex CLI works end to end:** `/v1/responses` streams real Responses events and carries function tools and tool-call history.
+- **Multi-agent:** cancel, join (`?wait=`), parent trees, MCP access and per-key limits for subagents; at most 8 at once; history survives restarts.
+- **Multi-access:** per-key `max_concurrent`; rate limits count requests, not failover attempts.
+- **MCP:** servers stay running between calls, config import from other apps, run a tool directly, long tool names shortened, image results passed as images, stderr in errors.
+- **Limits:** 64 MB request bodies, 300 s upstream silence cut-off.
+- **Console:** rebuilt around every API with a streaming playground and live route trace.
+
+Upgrade notes: older sessions are not loaded (they were not tied to a key); reaching admin through a non-loopback hostname without `--admin-token` now returns `403`.
+
 ## v0.2.0 — 2026-11-18
 
 ### Highlights

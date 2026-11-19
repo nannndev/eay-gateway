@@ -24,7 +24,11 @@ cargo run --bin eay-gateway -- --port 20199 --data-dir "$(mktemp -d)"
   sentence-style names, one behaviour per test.
 - **HTTP tests** in `crates/eay-gateway/tests/http_api.rs` drive the router in-process with
   `tower::ServiceExt::oneshot`: no network, no real providers.
-- Nothing calls a real provider. Use a local fake server for end-to-end checks.
+- **End-to-end tests** in `crates/eay-gateway/tests/e2e_mock_upstream.rs` start a fake
+  OpenAI-compatible upstream and fake MCP servers on local ports, then drive the real router:
+  streaming, failover, `/v1/messages` and `/v1/responses` tool calls, session memory and MCP
+  tool loops. Add a case there when you change a request path end to end.
+- Nothing calls a real provider.
 
 ## Releasing
 
