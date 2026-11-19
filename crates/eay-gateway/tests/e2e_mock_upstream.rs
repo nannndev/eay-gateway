@@ -22,6 +22,11 @@ use tower::ServiceExt;
 /// Every request body the fake upstream received, newest last.
 type Seen = Arc<Mutex<Vec<Value>>>;
 
+/// Slow subagents in flight right now, and the most there have ever been at once. Counting overlap
+/// (instead of timing the request) proves parallelism on a slow CI machine too.
+static SLOW_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SLOW_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn sse(chunks: &[Value]) -> String {
     let mut s: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
     s.push_str("data: [DONE]\n\n");
@@ -44,6 +49,28 @@ async fn chat(State(seen): State<Seen>, Json(body): Json<Value>) -> Response {
     let user_text =
         body["messages"].as_array().and_then(|m| m.iter().find(|m| m["role"] == "user")).and_then(|m| m["content"].as_str()).unwrap_or("");
     // A subagent answers directly (it may be offered `delegate` too, but does not use it).
+    if user_text.starts_with("HOLD:") && tool_result.is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "content": "done hold" }), Some("stop"))]),
+        )
+            .into_response();
+    }
+    if user_text.starts_with("SLOW:") && tool_result.is_none() {
+        // A subagent that takes a while: parallel delegation must overlap these.
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = SLOW_ACTIVE.fetch_add(1, SeqCst) + 1;
+        SLOW_PEAK.fetch_max(now, SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        SLOW_ACTIVE.fetch_sub(1, SeqCst);
+        let name = user_text.trim_start_matches("SLOW:").trim().to_string();
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "content": format!("done {name}") }), Some("stop"))]),
+        )
+            .into_response();
+    }
     if user_text.starts_with("SUB:") && tool_result.is_none() {
         return (
             [("content-type", "text/event-stream")],
@@ -54,6 +81,48 @@ async fn chat(State(seen): State<Seen>, Json(body): Json<Value>) -> Response {
     let mcp_tool = body["tools"]
         .as_array()
         .and_then(|t| t.iter().find_map(|t| t["function"]["name"].as_str().filter(|n| n.starts_with("mcp__") || *n == "eay_delegate")));
+    if mcp_tool == Some("eay_delegate") && tool_result.is_none() && user_text.starts_with("CANCEL") {
+        let args = json!({ "role": "Worker", "task": "HOLD: wait" }).to_string();
+        let delta = json!({ "role": "assistant", "tool_calls": [{ "index": 0, "id": "call_h", "type": "function",
+            "function": { "name": "eay_delegate", "arguments": args } }] });
+        return ([("content-type", "text/event-stream")], sse(&[chunk(delta, Some("tool_calls"))])).into_response();
+    }
+    // "FANOUT" hands three slow subtasks out in one reply, the third to the saved agent "tester".
+    if mcp_tool == Some("eay_delegate") && tool_result.is_none() && user_text.starts_with("FANOUT") {
+        let calls: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let mut args = json!({ "role": format!("Worker {n}"), "task": format!("SLOW: {n}") });
+                if *n == "c" {
+                    args["agent"] = json!("tester");
+                }
+                json!({ "index": i, "id": format!("call_{n}"), "type": "function", "function": { "name": "eay_delegate", "arguments": args.to_string() } })
+            })
+            .collect();
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "tool_calls": calls }), Some("tool_calls"))]),
+        )
+            .into_response();
+    }
+    if mcp_tool == Some("eay_delegate")
+        && body["messages"].as_array().is_some_and(|m| m.iter().filter(|m| m["role"] == "tool").count() == 3)
+    {
+        // The lead reports what its three workers said, in call order.
+        let outs: Vec<String> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or("").to_string())
+            .collect();
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "content": outs.join(" | ") }), Some("stop"))]),
+        )
+            .into_response();
+    }
     if mcp_tool == Some("eay_delegate") && tool_result.is_none() && !user_text.starts_with("SUB:") {
         // "LOOP" keeps delegating at every level; anything else delegates once.
         let task = if user_text.starts_with("LOOP") { "LOOP" } else { "SUB: do part one" };
@@ -272,7 +341,7 @@ done"#
     );
     let (st, body) = post_raw(
         &gw.app,
-        "/gateway/admin/mcp",
+        "/gateway/mcp",
         json!({ "name": "longtools", "transport": "stdio", "command": "sh", "args": ["-c", script] }),
         &[],
     )
@@ -328,7 +397,7 @@ async fn start_http_mcp() -> (String, Arc<Mutex<u32>>) {
 async fn http_mcp_reuses_its_session_and_passes_images_to_the_model() {
     let gw = gateway(false).await;
     let (url, inits) = start_http_mcp().await;
-    let (st, body) = post_raw(&gw.app, "/gateway/admin/mcp", json!({ "name": "browser", "transport": "http", "url": url }), &[]).await;
+    let (st, body) = post_raw(&gw.app, "/gateway/mcp", json!({ "name": "browser", "transport": "http", "url": url }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{body}");
 
     let (st, body) =
@@ -345,7 +414,7 @@ async fn http_mcp_reuses_its_session_and_passes_images_to_the_model() {
     assert_eq!(img.unwrap()["image_url"]["url"], "data:image/png;base64,iVBORw0KGgo=");
 
     // A direct tool call reuses the same session too.
-    let (st, _) = post_raw(&gw.app, "/gateway/admin/mcp/browser/call", json!({ "tool": "screenshot" }), &[]).await;
+    let (st, _) = post_raw(&gw.app, "/gateway/mcp/browser/call", json!({ "tool": "screenshot" }), &[]).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(*inits.lock().unwrap(), 1);
 }
@@ -386,7 +455,7 @@ async fn tool_policies_limit_gateway_run_mcp_tools() {
     let gw = gateway(false).await;
     let (st, body) = post_raw(
         &gw.app,
-        "/gateway/admin/mcp",
+        "/gateway/mcp",
         json!({ "name": "files", "transport": "stdio", "command": "sh", "args": ["-c", two_tool_mcp_script()] }),
         &[],
     )
@@ -400,20 +469,15 @@ async fn tool_policies_limit_gateway_run_mcp_tools() {
     };
 
     // An agent in read-only mode only sees tools the server marks read-only.
-    let (st, body) = post_raw(
-        &gw.app,
-        "/gateway/admin/agents",
-        json!({ "name": "reviewer", "model": "auto", "tool_policy": { "mode": "read_only" } }),
-        &[],
-    )
-    .await;
+    let (st, body) =
+        post_raw(&gw.app, "/gateway/agents", json!({ "name": "reviewer", "model": "auto", "tool_policy": { "mode": "read_only" } }), &[])
+            .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/reviewer", "messages": hello() }), &[("x-eay-mcp", "files")]).await;
     assert_eq!(offered(&gw.seen), ["mcp__files__read_file"]);
 
     // A key that denies read_file, used with no agent, sees only write_file.
-    let (st, created) =
-        post_raw(&gw.app, "/gateway/admin/keys", json!({ "name": "ci", "tool_policy": { "deny": ["read_file"] } }), &[]).await;
+    let (st, created) = post_raw(&gw.app, "/gateway/keys", json!({ "name": "ci", "tool_policy": { "deny": ["read_file"] } }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{created}");
     let secret = serde_json::from_str::<Value>(&created).unwrap()["key"]["key"].as_str().unwrap().to_string();
     let bearer = format!("Bearer {secret}");
@@ -437,9 +501,9 @@ async fn tool_policies_limit_gateway_run_mcp_tools() {
     assert!(offered(&gw.seen).is_empty());
 
     // Unknown modes are rejected, and no key is left behind.
-    let (st, _) = post_raw(&gw.app, "/gateway/admin/keys", json!({ "name": "bad", "tool_policy": { "mode": "yolo" } }), &[]).await;
+    let (st, _) = post_raw(&gw.app, "/gateway/keys", json!({ "name": "bad", "tool_policy": { "mode": "yolo" } }), &[]).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let req = Request::builder().uri("/gateway/admin/keys").body(Body::empty()).unwrap();
+    let req = Request::builder().uri("/gateway/keys").body(Body::empty()).unwrap();
     let resp = gw.app.clone().oneshot(req).await.unwrap();
     let keys: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let names: Vec<&str> = keys["keys"].as_array().unwrap().iter().filter_map(|k| k["name"].as_str()).collect();
@@ -456,52 +520,54 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
 async fn sessions_can_be_listed_and_read() {
     let gw = gateway(false).await;
     post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-session-id", "chat-1")]).await;
-    let (st, list) = get_json(&gw.app, "/gateway/admin/sessions").await;
+    let (st, list) = get_json(&gw.app, "/gateway/sessions").await;
     assert_eq!(st, StatusCode::OK);
     let s = &list["sessions"][0];
     assert_eq!(s["session"], "chat-1");
     assert_eq!(s["owner"], "local");
     assert_eq!(s["messages"], 2);
 
-    let (st, one) = get_json(&gw.app, &format!("/gateway/admin/sessions/{}", s["id"].as_str().unwrap())).await;
+    let (st, one) = get_json(&gw.app, &format!("/gateway/sessions/{}", s["id"].as_str().unwrap())).await;
     assert_eq!(st, StatusCode::OK, "{one}");
     assert_eq!(one["messages"][1]["content"], "pong");
     // A bare session name finds the local session too.
-    assert_eq!(get_json(&gw.app, "/gateway/admin/sessions/chat-1").await.0, StatusCode::OK);
-    assert_eq!(get_json(&gw.app, "/gateway/admin/sessions/nope").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get_json(&gw.app, "/gateway/sessions/chat-1").await.0, StatusCode::OK);
+    assert_eq!(get_json(&gw.app, "/gateway/sessions/nope").await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn a_model_can_delegate_to_a_subagent_when_its_agent_allows_it() {
     let gw = gateway(false).await;
     // Without max_subagents the model is not offered the delegate tool.
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "plain", "model": "auto" }), &[]).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "plain", "model": "auto" }), &[]).await;
     post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/plain", "messages": hello() }), &[]).await;
     assert!(gw.seen.lock().unwrap().last().unwrap().get("tools").is_none());
 
     let (st, body) =
-        post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[])
-            .await;
+        post_raw(&gw.app, "/gateway/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     let (st, body) = post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/lead", "messages": hello() }), &[]).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     // The lead's final answer echoes the subagent's result, which came back as the tool output.
-    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"], "tool said: sub done");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"], "tool said: [Helper]\nsub done");
 
-    let (_, subs) = get_json(&gw.app, "/gateway/admin/subagents").await;
-    let sub = &subs["subagents"][0];
-    assert_eq!(sub["role"], "Helper");
+    let (_, subs) = get_json(&gw.app, "/gateway/subagents").await;
+    let list = subs["subagents"].as_array().unwrap();
+    let sub = list.iter().find(|s| s["role"] == "Helper").expect("helper run");
     assert_eq!(sub["phase"], "completed");
     assert!(sub["parent_id"].as_str().unwrap().starts_with("req_"), "{sub}");
-    assert_eq!(subs["subagents"].as_array().unwrap().len(), 1, "the subagent did not start another one");
+    assert_eq!(list.iter().filter(|s| s["role"] == "Helper").count(), 1, "the subagent did not start another one");
+    // The request itself is the tree root, so the lead shows above its worker.
+    let lead = list.iter().find(|s| s["id"] == sub["parent_id"]).expect("lead root");
+    assert_eq!(lead["role"], "lead");
+    assert_eq!(lead["phase"], "completed");
 }
 
 #[tokio::test]
 async fn delegation_stops_at_the_depth_limit() {
     let gw = gateway(false).await;
     // A model that always delegates: each level starts another, until the gateway stops offering it.
-    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[])
-        .await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[]).await;
     let (st, _) = post_raw(
         &gw.app,
         "/v1/chat/completions",
@@ -510,8 +576,9 @@ async fn delegation_stops_at_the_depth_limit() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    let (_, subs) = get_json(&gw.app, "/gateway/admin/subagents").await;
-    assert_eq!(subs["subagents"].as_array().unwrap().len(), 3, "MAX_DELEGATE_DEPTH levels, no more");
+    let (_, subs) = get_json(&gw.app, "/gateway/subagents").await;
+    // The lead request plus one worker per level. The fourth level is not offered delegate.
+    assert_eq!(subs["subagents"].as_array().unwrap().len(), 4, "lead + MAX_DELEGATE_DEPTH workers, no more");
 }
 
 #[cfg(unix)]
@@ -520,14 +587,14 @@ async fn manual_approval_holds_a_tool_until_someone_answers() {
     let gw = gateway(false).await;
     post_raw(
         &gw.app,
-        "/gateway/admin/mcp",
+        "/gateway/mcp",
         json!({ "name": "files", "transport": "stdio", "command": "sh", "args": ["-c", two_tool_mcp_script()] }),
         &[],
     )
     .await;
     post_raw(
         &gw.app,
-        "/gateway/admin/agents",
+        "/gateway/agents",
         json!({ "name": "careful", "model": "auto", "tool_policy": { "approval": "manual", "allow": ["files/write_file"] } }),
         &[],
     )
@@ -542,7 +609,7 @@ async fn manual_approval_holds_a_tool_until_someone_answers() {
         // Wait for the tool call to show up as pending, then answer it.
         let mut id = None;
         for _ in 0..50 {
-            let (_, list) = get_json(&gw.app, "/gateway/admin/approvals").await;
+            let (_, list) = get_json(&gw.app, "/gateway/approvals").await;
             if let Some(a) = list["approvals"].as_array().and_then(|a| a.first()) {
                 assert_eq!(a["tool"], "mcp__files__write_file");
                 id = a["id"].as_str().map(String::from);
@@ -551,16 +618,132 @@ async fn manual_approval_holds_a_tool_until_someone_answers() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let id = id.expect("tool call never became pending");
-        let (st, _) = post_raw(&gw.app, &format!("/gateway/admin/approvals/{id}"), json!({ "approve": approve }), &[]).await;
+        let (st, _) = post_raw(&gw.app, &format!("/gateway/approvals/{id}"), json!({ "approve": approve }), &[]).await;
         assert_eq!(st, StatusCode::OK);
         let (st, body) = req.await.unwrap();
         assert_eq!(st, StatusCode::OK, "{body}");
         let answer = serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"].as_str().unwrap().to_string();
         assert!(answer.contains(expected), "approve={approve}: {answer}");
         // Answering twice is refused.
-        assert_eq!(
-            post_raw(&gw.app, &format!("/gateway/admin/approvals/{id}"), json!({ "approve": true }), &[]).await.0,
-            StatusCode::NOT_FOUND
-        );
+        assert_eq!(post_raw(&gw.app, &format!("/gateway/approvals/{id}"), json!({ "approve": true }), &[]).await.0, StatusCode::NOT_FOUND);
     }
+}
+
+#[tokio::test]
+async fn a_lead_runs_its_subagents_in_parallel_and_can_use_saved_agents() {
+    let gw = gateway(false).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[]).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "tester", "model": "auto", "description": "Writes tests" }), &[]).await;
+
+    let (st, body) = post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "agent/lead", "messages": [{ "role": "user", "content": "FANOUT" }] }),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"],
+        "[Worker a]\ndone a | [Worker b]\ndone b | [Worker c · tester]\ndone c"
+    );
+    // All three subagents were in flight at the same moment (each waits 400 ms in the mock).
+    assert_eq!(SLOW_PEAK.load(std::sync::atomic::Ordering::SeqCst), 3, "subagents did not run in parallel");
+
+    // The lead was told which saved agents exist, and the third worker ran as agent/tester.
+    let lead_req = gw
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|b| {
+            b["messages"][0]["content"].as_str().is_some_and(|c| c.contains("FANOUT"))
+                || b["messages"].as_array().is_some_and(|m| m.iter().any(|m| m["content"] == "FANOUT"))
+        })
+        .cloned()
+        .unwrap();
+    let delegate = lead_req["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "eay_delegate").unwrap().clone();
+    assert!(delegate["function"]["description"].as_str().unwrap().contains("tester: Writes tests"), "{delegate}");
+    assert_eq!(delegate["function"]["parameters"]["properties"]["agent"]["enum"], json!(["tester"]));
+
+    // tester has no max_subagents, so it must not be handed a budget just because the lead has one.
+    // A generic worker (no saved agent) still inherits the lead's budget.
+    {
+        let seen = gw.seen.lock().unwrap();
+        let user = |b: &Value| -> String {
+            b["messages"]
+                .as_array()
+                .and_then(|m| m.iter().find(|m| m["role"] == "user"))
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let slow_c = seen.iter().find(|b| user(b) == "SLOW: c").expect("tester request");
+        let names = |b: &Value| -> Vec<String> {
+            b["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect()
+        };
+        assert_eq!(names(slow_c), ["eay_say"], "a saved agent without a budget can talk to the team but not delegate");
+        let slow_a = seen.iter().find(|b| user(b) == "SLOW: a").expect("worker a");
+        let a_tools = names(slow_a);
+        assert!(a_tools.iter().any(|n| n == "eay_delegate") && a_tools.iter().any(|n| n == "eay_say"), "{a_tools:?}");
+    }
+
+    // The lead request is the root; the three workers sit under it, in start order.
+    let (_, tree) = get_json(&gw.app, "/gateway/subagents/tree").await;
+    let roots = tree["tree"].as_array().unwrap();
+    assert_eq!(roots.len(), 1, "{tree}");
+    assert_eq!(roots[0]["role"], "lead");
+    let kids = roots[0]["children"].as_array().unwrap();
+    assert_eq!(kids.len(), 3, "{kids:?}");
+    let models: Vec<&str> = kids.iter().filter_map(|r| r["model"].as_str()).collect();
+    assert_eq!(models.last().copied(), Some("agent/tester"), "{models:?}");
+    assert!(kids.iter().all(|r| r["children"].as_array().unwrap().is_empty()));
+}
+
+#[tokio::test]
+async fn cancelling_the_lead_skips_its_wrap_up_turn() {
+    let gw = gateway(false).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[]).await;
+    let app = gw.app.clone();
+    let pending = tokio::spawn(async move {
+        post_raw(&app, "/v1/chat/completions", json!({ "model": "agent/lead", "messages": [{ "role": "user", "content": "CANCEL" }] }), &[])
+            .await
+    });
+    let mut root = None;
+    for _ in 0..40 {
+        let (_, tree) = get_json(&gw.app, "/gateway/subagents/tree").await;
+        if let Some(id) = tree["tree"].as_array().and_then(|t| t.first()).and_then(|r| r["id"].as_str()) {
+            root = Some(id.to_string());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let root = root.expect("the lead run was never opened");
+    let (st, _) = post_raw(&gw.app, &format!("/gateway/subagents/{root}/cancel"), json!({}), &[]).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, body) = pending.await.unwrap();
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert!(body.contains("cancelled"), "{body}");
+    let wrap_up = gw.seen.lock().unwrap().iter().any(|b| b["messages"].as_array().is_some_and(|m| m.iter().any(|m| m["role"] == "tool")));
+    assert!(!wrap_up, "the lead was asked to summarize after it was cancelled");
+}
+
+#[tokio::test]
+async fn the_tree_nests_children_under_their_parent_run() {
+    let gw = gateway(false).await;
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[]).await;
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/loop", "messages": [{ "role": "user", "content": "LOOP" }] }), &[])
+        .await;
+    let (_, tree) = get_json(&gw.app, "/gateway/subagents/tree").await;
+    let roots = tree["tree"].as_array().unwrap();
+    assert_eq!(roots.len(), 1, "{tree}");
+    assert_eq!(roots[0]["role"], "loop");
+    // lead → sub → sub → sub. Three workers, one child each; the fourth level is not started.
+    let mut depth = 0;
+    let mut node = &roots[0];
+    while let Some(c) = node["children"].as_array().unwrap().first() {
+        depth += 1;
+        node = c;
+    }
+    assert_eq!(depth, 3);
 }

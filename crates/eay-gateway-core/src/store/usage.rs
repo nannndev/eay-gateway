@@ -1,5 +1,5 @@
 use super::{now, query_rows, GatewayStore, UsageEntry};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -7,7 +7,7 @@ impl GatewayStore {
     // ---- Usage & Stats ---------------------------------------------
     pub fn list_usage(&self, limit: i64) -> Vec<Value> {
         let conn = self.conn.lock();
-        query_rows(&conn, "SELECT id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming FROM usage ORDER BY ts DESC LIMIT ?1", params![limit], |r| {
+        query_rows(&conn, "SELECT id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, agent, team FROM usage ORDER BY ts DESC LIMIT ?1", params![limit], |r| {
                 Ok(json!({
                     "id": r.get::<_, String>(0)?,
                     "ts": r.get::<_, f64>(1)?,
@@ -22,6 +22,8 @@ impl GatewayStore {
                     "status_code": r.get::<_, Option<i64>>(10)?.unwrap_or(200),
                     "error": r.get::<_, Option<String>>(11)?,
                     "streaming": r.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0,
+                    "agent": r.get::<_, Option<String>>(13)?,
+                    "team": r.get::<_, Option<String>>(14)?,
                 }))
             })
     }
@@ -36,12 +38,14 @@ impl GatewayStore {
         let conn = self.conn.lock();
         let id = format!("usg_{}", uuid::Uuid::new_v4().simple());
         let cost = u.model.map_or(0.0, |m| crate::pricing::cost(m, u.input_tokens, u.output_tokens, u.cached_tokens));
+        let agent = clip_usage_label(u.agent);
+        let team = clip_usage_label(u.team);
         let _ = conn.execute(
-            "INSERT INTO usage (id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, cached_tokens, cost) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO usage (id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, cached_tokens, cost, agent, team) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 id, now(), u.key_id, u.key_name, u.provider, u.model,
                 u.input_tokens, u.output_tokens, u.duration_ms, u.status, u.status_code, u.error,
-                i64::from(u.streaming), u.cached_tokens, cost
+                i64::from(u.streaming), u.cached_tokens, cost, agent, team
             ],
         );
     }
@@ -121,7 +125,47 @@ impl GatewayStore {
             |r| Ok(json!({ "model": r.get::<_, String>(0)?, "provider": r.get::<_, String>(1)?, "tokens": r.get::<_, i64>(2)?, "cost": r.get::<_, f64>(3)? })),
         );
         // `top_models` covers today only; `models` covers the requested range.
-        json!({ "days": days_json, "recent": recent, "top_models": top, "models": models })
+        // `agents` and `teams` skip rows logged before those columns existed.
+        let agent_rows = query_rows(
+            &conn,
+            "SELECT agent, COALESCE(provider,''), COALESCE(model,'auto'), COUNT(*),
+                    SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0)), SUM(COALESCE(cost,0))
+             FROM usage WHERE ts >= ?1 AND agent IS NOT NULL AND agent != ''
+             GROUP BY agent, provider, model",
+            params![since],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, f64>(5)?,
+                ))
+            },
+        );
+        let team_rows = query_rows(
+            &conn,
+            "SELECT team, COALESCE(agent,''), COALESCE(provider,''), COALESCE(model,'auto'), COUNT(*),
+                    SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0)), SUM(COALESCE(cost,0))
+             FROM usage WHERE ts >= ?1 AND team IS NOT NULL AND team != ''
+             GROUP BY team, agent, provider, model",
+            params![since],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, f64>(6)?,
+                ))
+            },
+        );
+        let agents = fold_agents(agent_rows);
+        let teams = fold_teams(&conn, team_rows);
+        json!({ "days": days_json, "recent": recent, "top_models": top, "models": models, "agents": agents, "teams": teams })
     }
 
     pub fn get_stats(&self) -> Value {
@@ -162,4 +206,126 @@ impl GatewayStore {
 
         stats
     }
+}
+
+const USAGE_GROUP_CAP: usize = 30;
+const USAGE_MODEL_CAP: usize = 8;
+
+fn clip_usage_label(raw: Option<&str>) -> Option<String> {
+    let label: String = raw?.trim().chars().take(64).collect();
+    if label.is_empty() {
+        None
+    } else {
+        Some(label)
+    }
+}
+
+struct ModelUse {
+    provider: String,
+    model: String,
+    requests: i64,
+    tokens: i64,
+    cost: f64,
+}
+
+fn push_model(models: &mut Vec<ModelUse>, provider: String, model: String, requests: i64, tokens: i64, cost: f64) {
+    if let Some(found) = models.iter_mut().find(|m| m.provider == provider && m.model == model) {
+        found.requests += requests;
+        found.tokens += tokens;
+        found.cost += cost;
+        return;
+    }
+    models.push(ModelUse { provider, model, requests, tokens, cost });
+}
+
+fn model_json(models: &mut Vec<ModelUse>) -> Vec<Value> {
+    models.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.model.cmp(&b.model)).then(a.provider.cmp(&b.provider)));
+    models.truncate(USAGE_MODEL_CAP);
+    models
+        .iter()
+        .map(|m| json!({ "provider": m.provider, "model": m.model, "requests": m.requests, "tokens": m.tokens, "cost": m.cost }))
+        .collect()
+}
+
+fn fold_agents(rows: Vec<(String, String, String, i64, i64, f64)>) -> Vec<Value> {
+    let mut names: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, (i64, i64, f64, Vec<ModelUse>)> = HashMap::new();
+    for (agent, provider, model, requests, tokens, cost) in rows {
+        let entry = groups.entry(agent.clone()).or_insert_with(|| {
+            names.push(agent);
+            (0, 0, 0.0, Vec::new())
+        });
+        entry.0 += requests;
+        entry.1 += tokens;
+        entry.2 += cost;
+        push_model(&mut entry.3, provider, model, requests, tokens, cost);
+    }
+    let mut ranked: Vec<_> = names
+        .into_iter()
+        .filter_map(|agent| {
+            let (requests, tokens, cost, mut models) = groups.remove(&agent)?;
+            let models = model_json(&mut models);
+            Some((tokens, agent.clone(), json!({ "agent": agent, "requests": requests, "tokens": tokens, "cost": cost, "models": models })))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    ranked.truncate(USAGE_GROUP_CAP);
+    ranked.into_iter().map(|(_, _, row)| row).collect()
+}
+
+fn fold_teams(conn: &Connection, rows: Vec<(String, String, String, String, i64, i64, f64)>) -> Vec<Value> {
+    struct TeamAcc {
+        requests: i64,
+        tokens: i64,
+        cost: f64,
+        agents: HashMap<String, (i64, i64, f64)>,
+        models: Vec<ModelUse>,
+    }
+    let mut ids: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, TeamAcc> = HashMap::new();
+    for (team, agent, provider, model, requests, tokens, cost) in rows {
+        let entry = groups.entry(team.clone()).or_insert_with(|| {
+            ids.push(team);
+            TeamAcc { requests: 0, tokens: 0, cost: 0.0, agents: HashMap::new(), models: Vec::new() }
+        });
+        entry.requests += requests;
+        entry.tokens += tokens;
+        entry.cost += cost;
+        if !agent.is_empty() {
+            let speaker = entry.agents.entry(agent).or_insert((0, 0, 0.0));
+            speaker.0 += requests;
+            speaker.1 += tokens;
+            speaker.2 += cost;
+        }
+        push_model(&mut entry.models, provider, model, requests, tokens, cost);
+    }
+    let mut ranked = Vec::new();
+    for id in ids {
+        let Some(team) = groups.remove(&id) else { continue };
+        let name: String = conn.query_row("SELECT name FROM teams WHERE id = ?1", params![id], |r| r.get(0)).unwrap_or_else(|_| id.clone());
+        ranked.push((team.tokens, id, name, team));
+    }
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    ranked.truncate(USAGE_GROUP_CAP);
+    ranked
+        .into_iter()
+        .map(|(_, id, name, mut team)| {
+            let mut agents: Vec<_> = team.agents.into_iter().collect();
+            agents.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then(a.0.cmp(&b.0)));
+            agents.truncate(USAGE_GROUP_CAP);
+            let agents: Vec<_> = agents
+                .into_iter()
+                .map(|(agent, (requests, tokens, cost))| json!({ "agent": agent, "requests": requests, "tokens": tokens, "cost": cost }))
+                .collect();
+            json!({
+                "id": id,
+                "name": name,
+                "requests": team.requests,
+                "tokens": team.tokens,
+                "cost": team.cost,
+                "agents": agents,
+                "models": model_json(&mut team.models),
+            })
+        })
+        .collect()
 }

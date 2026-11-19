@@ -20,8 +20,8 @@ The gateway sends each request to one of your connected accounts and automatical
 - **Agents, Skills & Session Memory:**
   - Reusable **Skills** (`+skill`, `x-eay-skills`, or upload `SKILL.md` in eay-console)
   - **Agent Profiles** (`agent/<name>`) combining model/combo, skills, personality, tuning and a tool policy
-  - **Session Memory** via `x-eay-session-id`, private per key, browsable through `GET /gateway/admin/sessions`
-- **Multi-agent:** subagents you start (cancel, wait, parent trees, history) or that the model starts itself with the `eay_delegate` tool; children never get more permission than their parent and stop at three levels
+  - **Session Memory** via `x-eay-session-id`, private per key, browsable through `GET /gateway/sessions`. A session can remember a roster (`x-eay-team`); two sessions may share that roster and still keep separate chats
+- **Multi-agent:** subagents you start (cancel, wait, parent trees, history) or that the model starts itself with the `eay_delegate` tool, including several at once and saved agents (`agent/reviewer`). Cancelling a run stops the runs under it. Children never get more permission than their parent and stop at three levels
 - **Tool control for gateway-run tools:** per agent or key, `read_only` / allow / deny lists, and **manual approval** (`manual` or `manual_for_writes`) with Approve/Deny in eay-console. Coding apps keep their own permission modes
 - **Guardrails & Budgets:** Virtual keys (`gw-sk-…`) with per-key `allowed_providers`, `rate_limit_per_min`, `max_concurrent`, `max_tokens_budget`, `max_cost_usd`, private session memory, plus optional secret redaction (`x-eay-redact: true`) and context trimming (`x-eay-max-context-chars`)
 - **External MCP Connectors (`x-eay-mcp`):** Connect local `stdio` MCP servers (Filesystem, GitHub, Postgres) and Streamable HTTP remote MCP servers (Notion, Linear, Figma) with custom auth headers and automatic tool execution loops; local servers stay running between calls, and configs import straight from Claude Desktop, Claude Code, Cursor or VS Code
@@ -37,7 +37,7 @@ brew install nannndev/tap/eay-gateway && brew services start eay-gateway
 Connect a provider, then send a request:
 
 ```sh
-curl -X POST http://127.0.0.1:20129/gateway/admin/providers/deepseek/connect \
+curl -X POST http://127.0.0.1:20129/gateway/providers/deepseek/connect \
   -H 'content-type: application/json' -d '{"api_key":"sk-..."}'
 
 curl http://127.0.0.1:20129/v1/chat/completions -H 'content-type: application/json' \
@@ -65,7 +65,7 @@ Raspberry Pi there is a Docker image: see [Getting started](docs/getting-started
 | [Configuration](docs/configuration.md) | Flags, environment variables, data folder, sharing one gateway between apps |
 | [Routing](docs/routing.md) | Model ids, auto modes, combos, strategies, fallback and cooldown |
 | [Providers](docs/providers.md) | Every provider, its alias, how to log in, quotas and model sync |
-| [HTTP API](docs/api.md) | `/v1` inference APIs and `/gateway/admin` management: keys, agents, tool policies, subagents, approvals, sessions & live activity |
+| [HTTP API](docs/api.md) | `/v1` inference APIs and `/gateway/<resource>` management: keys, agents, tool policies, subagents, approvals, sessions & live activity |
 | [Architecture](docs/architecture.md) | Crates and modules, request flow, storage, embedding the core in Rust |
 | [Development](docs/development.md) | Building, testing, releasing, adding a provider |
 
@@ -77,7 +77,7 @@ npm run docs:dev    # http://localhost:5173
 
 ## Security
 
-- By default the gateway binds to `127.0.0.1` without admin authentication, and admin routes accept only loopback `Host` headers. If you expose it beyond localhost, pass `--admin-token <TOKEN>` (or set `EAY_GATEWAY_ADMIN_TOKEN`) to protect `/gateway/admin/*`. Add `--admin-read-token <TOKEN>` for a token that can only read (dashboards, monitors).
+- By default the gateway binds to `127.0.0.1` without admin authentication, and admin routes accept only loopback `Host` headers. If you expose it beyond localhost, pass `--admin-token <TOKEN>` (or set `EAY_GATEWAY_ADMIN_TOKEN`) to protect management routes such as `/gateway/keys` and `/gateway/agents`. `/v1`, `/gateway/v1`, and `/gateway/health` stay open. Add `--admin-read-token <TOKEN>` for a token that can only read (dashboards, monitors).
 - Browser pages can only call the gateway from `http://localhost:<port>` or origins you allow with `--console-origin` (for a hosted [eay-console](https://github.com/nannndev/eay-console)); other sites get `403`.
 - API keys and OAuth tokens are encrypted on disk with AES-256-GCM, using a key file in the data folder.
 - Clients of `/v1/*` may present gateway-issued virtual keys (`gw-sk-…`) with per-key provider limits, rate limits, token/USD budgets, and default skills.

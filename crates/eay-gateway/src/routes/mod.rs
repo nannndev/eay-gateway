@@ -1,6 +1,12 @@
 pub mod accounts;
-pub mod admin;
+pub mod agents;
+pub mod connectors;
+pub mod inference;
+pub mod keys;
 pub mod providers;
+pub mod runs;
+pub mod settings;
+pub mod skills;
 
 use axum::{
     extract::Request,
@@ -175,103 +181,138 @@ async fn concurrency_middleware(axum::extract::State(engine): axum::extract::Sta
 /// or several large images in one chat request.
 pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
-/// Builds the Axum router for OpenAI-compatible inference and gateway admin APIs.
+/// Builds the Axum router for OpenAI-compatible inference and gateway management APIs.
 pub fn gateway_router(engine: GatewayEngine) -> Router {
     let public = Router::new()
         .route("/", get(handle_root))
         // Core chat completions, Anthropic/Responses native, multimodal passthrough & health
-        .route("/v1/chat/completions", post(admin::handle_chat_completions))
-        .route("/gateway/v1/chat/completions", post(admin::handle_chat_completions))
-        .route("/v1/messages", post(admin::handle_anthropic_messages))
-        .route("/gateway/v1/messages", post(admin::handle_anthropic_messages))
-        .route("/v1/responses", post(admin::handle_responses))
-        .route("/gateway/v1/responses", post(admin::handle_responses))
-        .route("/v1/embeddings", post(admin::handle_embeddings))
-        .route("/gateway/v1/embeddings", post(admin::handle_embeddings))
-        .route("/v1/images/generations", post(admin::handle_images_generations))
-        .route("/gateway/v1/images/generations", post(admin::handle_images_generations))
-        .route("/v1/audio/speech", post(admin::handle_audio_speech))
-        .route("/gateway/v1/audio/speech", post(admin::handle_audio_speech))
-        .route("/v1/audio/transcriptions", post(admin::handle_audio_transcriptions))
-        .route("/gateway/v1/audio/transcriptions", post(admin::handle_audio_transcriptions))
-        .route("/v1/audio/translations", post(admin::handle_audio_translations))
-        .route("/gateway/v1/audio/translations", post(admin::handle_audio_translations))
-        .route("/v1/models", get(admin::handle_list_models_v1))
-        .route("/gateway/v1/models", get(admin::handle_list_models_v1))
-        .route("/gateway/health", get(admin::handle_health))
+        .route("/v1/chat/completions", post(inference::handle_chat_completions))
+        .route("/gateway/v1/chat/completions", post(inference::handle_chat_completions))
+        .route("/v1/messages", post(inference::handle_anthropic_messages))
+        .route("/gateway/v1/messages", post(inference::handle_anthropic_messages))
+        .route("/v1/responses", post(inference::handle_responses))
+        .route("/gateway/v1/responses", post(inference::handle_responses))
+        .route("/v1/embeddings", post(inference::handle_embeddings))
+        .route("/gateway/v1/embeddings", post(inference::handle_embeddings))
+        .route("/v1/images/generations", post(inference::handle_images_generations))
+        .route("/gateway/v1/images/generations", post(inference::handle_images_generations))
+        .route("/v1/audio/speech", post(inference::handle_audio_speech))
+        .route("/gateway/v1/audio/speech", post(inference::handle_audio_speech))
+        .route("/v1/audio/transcriptions", post(inference::handle_audio_transcriptions))
+        .route("/gateway/v1/audio/transcriptions", post(inference::handle_audio_transcriptions))
+        .route("/v1/audio/translations", post(inference::handle_audio_translations))
+        .route("/gateway/v1/audio/translations", post(inference::handle_audio_translations))
+        .route("/v1/models", get(inference::handle_list_models_v1))
+        .route("/gateway/v1/models", get(inference::handle_list_models_v1))
+        .route("/gateway/health", get(inference::handle_health))
         .layer(middleware::from_fn_with_state(engine.clone(), concurrency_middleware))
         // axum's 2 MB default rejects long agent contexts, inline images/PDFs and audio uploads.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES));
 
     let admin_routes = Router::new()
         // Accounts (OAuth)
-        .route("/gateway/admin/accounts", get(accounts::handle_list_accounts).post(accounts::handle_save_account))
-        .route("/gateway/admin/accounts/usage", get(accounts::handle_accounts_usage))
-        .route("/gateway/admin/accounts/:provider", delete(accounts::handle_delete_account_by_query))
-        .route("/gateway/admin/accounts/:provider/:id", delete(accounts::handle_remove_account))
-        .route("/gateway/admin/accounts/:provider/:id/toggle", patch(accounts::handle_toggle_account))
-        .route("/gateway/admin/accounts/:provider/reorder", post(accounts::handle_reorder_accounts))
-        .route("/gateway/admin/accounts/:provider/start", post(accounts::handle_oauth_start))
-        .route("/gateway/admin/accounts/:provider/complete", post(accounts::handle_oauth_complete))
-        .route("/gateway/admin/accounts/:provider/poll", post(accounts::handle_oauth_poll))
-        .route("/gateway/admin/accounts/:provider/test", post(accounts::handle_oauth_test))
+        .route("/gateway/accounts", get(accounts::handle_list_accounts).post(accounts::handle_save_account))
+        .route("/gateway/accounts/usage", get(accounts::handle_accounts_usage))
+        .route("/gateway/accounts/:provider", delete(accounts::handle_delete_account_by_query))
+        .route("/gateway/accounts/:provider/:id", delete(accounts::handle_remove_account))
+        .route("/gateway/accounts/:provider/:id/toggle", patch(accounts::handle_toggle_account))
+        .route("/gateway/accounts/:provider/reorder", post(accounts::handle_reorder_accounts))
+        .route("/gateway/accounts/:provider/start", post(accounts::handle_oauth_start))
+        .route("/gateway/accounts/:provider/complete", post(accounts::handle_oauth_complete))
+        .route("/gateway/accounts/:provider/poll", post(accounts::handle_oauth_poll))
+        .route("/gateway/accounts/:provider/test", post(accounts::handle_oauth_test))
         // Providers & Custom Models
-        .route("/gateway/admin/providers", get(providers::handle_list_providers))
-        .route("/gateway/admin/providers/:id/toggle", patch(providers::handle_toggle_provider))
-        .route("/gateway/admin/providers/:id/import", post(providers::handle_import_local_key))
-        .route("/gateway/admin/providers/:id/connect", post(providers::handle_connect_provider))
-        .route("/gateway/admin/providers/:id/disconnect", post(providers::handle_disconnect_provider))
-        .route("/gateway/admin/providers/:id/key", post(providers::handle_save_provider_key))
-        .route("/gateway/admin/providers/:id/keys", post(providers::handle_add_provider_key))
+        .route("/gateway/providers", get(providers::handle_list_providers))
+        .route("/gateway/providers/:id/toggle", patch(providers::handle_toggle_provider))
+        .route("/gateway/providers/:id/import", post(providers::handle_import_local_key))
+        .route("/gateway/providers/:id/connect", post(providers::handle_connect_provider))
+        .route("/gateway/providers/:id/disconnect", post(providers::handle_disconnect_provider))
+        .route("/gateway/providers/:id/key", post(providers::handle_save_provider_key))
+        .route("/gateway/providers/:id/keys", post(providers::handle_add_provider_key))
         .route(
-            "/gateway/admin/providers/:id/models",
+            "/gateway/providers/:id/models",
             get(providers::handle_get_provider_models)
                 .post(providers::handle_add_provider_model)
                 .put(providers::handle_set_provider_models)
                 .delete(providers::handle_delete_provider_model_body),
         )
-        .route("/gateway/admin/providers/:id/models/sync", post(providers::handle_sync_provider_models))
-        .route("/gateway/admin/providers/:id/models/:model", delete(providers::handle_delete_provider_model))
+        .route("/gateway/providers/:id/models/sync", post(providers::handle_sync_provider_models))
+        .route("/gateway/providers/:id/models/:model", delete(providers::handle_delete_provider_model))
         // Virtual Keys
-        .route("/gateway/admin/keys", get(admin::handle_list_keys).post(admin::handle_create_key))
-        .route("/gateway/admin/keys/:id/toggle", patch(admin::handle_toggle_key))
-        .route("/gateway/admin/keys/:id", delete(admin::handle_delete_key))
+        .route("/gateway/keys", get(keys::handle_list_keys).post(keys::handle_create_key))
+        .route("/gateway/keys/:id/toggle", patch(keys::handle_toggle_key))
+        .route("/gateway/keys/:id", delete(keys::handle_delete_key))
         // Combos
-        .route("/gateway/admin/combos", get(admin::handle_list_combos).post(admin::handle_save_combo))
-        .route("/gateway/admin/combos/:name", put(admin::handle_put_combo).delete(admin::handle_delete_combo))
+        .route("/gateway/combos", get(settings::handle_list_combos).post(settings::handle_save_combo))
+        .route("/gateway/combos/:name", put(settings::handle_put_combo).delete(settings::handle_delete_combo))
         // Skills (Context Presets) & Agents (Personalities) & Sessions
-        .route("/gateway/admin/skills", get(admin::handle_list_skills).post(admin::handle_save_skill))
-        .route("/gateway/admin/skills/:name", put(admin::handle_put_skill).delete(admin::handle_delete_skill))
-        .route("/gateway/admin/skills/:name/toggle", patch(admin::handle_toggle_skill))
-        .route("/gateway/admin/agents", get(admin::handle_list_agents).post(admin::handle_save_agent))
-        .route("/gateway/admin/agents/:name", put(admin::handle_put_agent).delete(admin::handle_delete_agent))
-        .route("/gateway/admin/sessions", get(admin::handle_list_sessions))
-        .route("/gateway/admin/sessions/:id", get(admin::handle_get_session).delete(admin::handle_delete_session))
+        .route("/gateway/skills", get(skills::handle_list_skills).post(skills::handle_save_skill))
+        .route("/gateway/skills/:name", put(skills::handle_put_skill).delete(skills::handle_delete_skill))
+        .route("/gateway/skills/:name/toggle", patch(skills::handle_toggle_skill))
+        .route("/gateway/agents", get(agents::handle_list_agents).post(agents::handle_save_agent))
+        .route("/gateway/agents/:name", put(agents::handle_put_agent).delete(agents::handle_delete_agent))
+        .route("/gateway/teams", get(agents::handle_list_teams).post(agents::handle_save_team))
+        .route("/gateway/teams/:id", delete(agents::handle_delete_team))
+        .route("/gateway/sessions", get(agents::handle_list_sessions))
+        .route("/gateway/sessions/:id", get(agents::handle_get_session).delete(agents::handle_delete_session))
         // Live Activity & Subagents
-        .route("/gateway/admin/events", get(admin::handle_activity_events))
-        .route("/gateway/admin/activity", get(admin::handle_activity_snapshot))
-        .route("/gateway/admin/subagents", get(admin::handle_list_subagents).post(admin::handle_spawn_subagent))
-        .route("/gateway/admin/subagents/:id", get(admin::handle_get_subagent).delete(admin::handle_delete_subagent))
-        .route("/gateway/admin/subagents/:id/cancel", post(admin::handle_cancel_subagent))
-        .route("/gateway/admin/approvals", get(admin::handle_list_approvals))
-        .route("/gateway/admin/approvals/:id", post(admin::handle_resolve_approval))
+        .route("/gateway/events", get(runs::handle_activity_events))
+        .route("/gateway/activity", get(runs::handle_activity_snapshot))
+        .route("/gateway/subagents", get(runs::handle_list_subagents).post(runs::handle_spawn_subagent))
+        .route("/gateway/subagents/tree", get(runs::handle_subagent_tree))
+        .route("/gateway/subagents/:id", get(runs::handle_get_subagent).delete(runs::handle_delete_subagent))
+        .route("/gateway/subagents/:id/cancel", post(runs::handle_cancel_subagent))
+        .route("/gateway/approvals", get(runs::handle_list_approvals))
+        .route("/gateway/approvals/:id", post(runs::handle_resolve_approval))
         // External MCP Connectors
-        .route("/gateway/admin/mcp", get(admin::handle_list_mcp).post(admin::handle_save_mcp))
-        .route("/gateway/admin/mcp/import", post(admin::handle_import_mcp))
-        .route("/gateway/admin/mcp/:name", delete(admin::handle_delete_mcp))
-        .route("/gateway/admin/mcp/:name/call", post(admin::handle_mcp_call))
-        .route("/gateway/admin/mcp/:name/toggle", patch(admin::handle_toggle_mcp))
-        .route("/gateway/admin/mcp/:name/tools", post(admin::handle_mcp_tools))
+        .route("/gateway/mcp", get(connectors::handle_list_mcp).post(connectors::handle_save_mcp))
+        .route("/gateway/mcp/import", post(connectors::handle_import_mcp))
+        .route("/gateway/mcp/:name", delete(connectors::handle_delete_mcp))
+        .route("/gateway/mcp/:name/call", post(connectors::handle_mcp_call))
+        .route("/gateway/mcp/:name/toggle", patch(connectors::handle_toggle_mcp))
+        .route("/gateway/mcp/:name/tools", post(connectors::handle_mcp_tools))
         // Models, Usage, Stats, Settings
-        .route("/gateway/admin/models", get(admin::handle_admin_models))
-        .route("/gateway/admin/usage", get(admin::handle_list_usage).delete(admin::handle_clear_usage))
-        .route("/gateway/admin/stats", get(admin::handle_get_stats))
-        .route("/gateway/admin/analytics", get(admin::handle_analytics))
-        .route("/gateway/admin/settings", get(admin::handle_get_settings).post(admin::handle_update_settings))
+        .route("/gateway/models", get(settings::handle_admin_models))
+        .route("/gateway/usage", get(settings::handle_list_usage).delete(settings::handle_clear_usage))
+        .route("/gateway/stats", get(settings::handle_get_stats))
+        .route("/gateway/analytics", get(settings::handle_analytics))
+        .route("/gateway/settings", get(settings::handle_get_settings).post(settings::handle_update_settings))
         .layer(middleware::from_fn(admin_auth_middleware));
 
     // CORS sits outside every other layer so preflights never reach auth or concurrency checks.
     public.merge(admin_routes).with_state(engine).layer(middleware::from_fn(cors_middleware))
+}
+
+/// The gateway as a service: the router, with legacy `/gateway/admin/*` paths rewritten first.
+/// Use this to serve it; `gateway_router` alone has no `/gateway/admin` paths.
+pub fn gateway_service(router: Router) -> LegacyAdminService {
+    tower::ServiceBuilder::new().map_request(rewrite_legacy_admin_uri as fn(Request) -> Request).service(router)
+}
+
+pub type LegacyAdminService = tower::util::MapRequest<Router, fn(Request) -> Request>;
+
+/// Management routes lived under `/gateway/admin/*` until 0.4. Clients built against that
+/// (OpenNotchi, eay-console before 0.4) keep working: `/gateway/admin/keys` is answered by
+/// `/gateway/keys` with the same auth and CORS. It runs before routing, because a router layer runs
+/// only after a route has matched.
+fn rewrite_legacy_admin_uri(mut req: Request) -> Request {
+    if let Some(new) = legacy_admin_path(req.uri()).and_then(|p| p.parse().ok()) {
+        *req.uri_mut() = new;
+    }
+    req
+}
+
+/// `/gateway/admin/keys?x=1` → `/gateway/keys?x=1`; None for any other path.
+fn legacy_admin_path(uri: &axum::http::Uri) -> Option<String> {
+    let rest = uri.path().strip_prefix("/gateway/admin")?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let path = if rest.is_empty() { "/gateway".to_string() } else { format!("/gateway{rest}") };
+    Some(match uri.query() {
+        Some(q) => format!("{path}?{q}"),
+        None => path,
+    })
 }
 
 #[cfg(test)]

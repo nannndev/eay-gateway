@@ -83,7 +83,7 @@ To run a separate, isolated gateway on purpose, give it its own `--port` and `--
 
 - **Model lists:** every hour the gateway re-fetches the model list of each connected provider whose
   list is more than a day old.
-- **Quotas:** fetched on demand by `GET /gateway/admin/accounts/usage` and cached for 2 minutes per
+- **Quotas:** fetched on demand by `GET /gateway/accounts/usage` and cached for 2 minutes per
   account. A failed read keeps the last good values.
 - **Tokens:** OAuth access tokens are refreshed shortly before they expire, and once more on a 401.
 

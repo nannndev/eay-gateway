@@ -1,5 +1,6 @@
 use super::{
-    hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, McpServerRecord, SkillRecord, VirtualKeyRecord, KEY_PREFIX,
+    hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, McpServerRecord, SkillRecord, TeamRecord, VirtualKeyRecord,
+    KEY_PREFIX,
 };
 use rusqlite::params;
 use serde_json::Value;
@@ -257,7 +258,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy FROM agents ORDER BY name ASC",
+            "SELECT name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy, mcp FROM agents ORDER BY name ASC",
             [],
             |r| {
                 let skills_json: String = r.get(3)?;
@@ -268,6 +269,7 @@ impl GatewayStore {
                     description: r.get(1)?,
                     model: r.get(2)?,
                     skills,
+                    mcp: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
                     personality: r.get(4)?,
                     temperature: r.get(5)?,
                     max_tokens: max_tokens.and_then(|v| u64::try_from(v).ok()),
@@ -295,8 +297,10 @@ impl GatewayStore {
         max_tokens: Option<u64>,
         tool_policy: &crate::mcp::ToolPolicy,
         enabled: bool,
+        mcp: &[String],
     ) -> Result<AgentProfile, String> {
         tool_policy.validate()?;
+        let mcp = clean_mcp_names(mcp)?;
         let policy_json = if tool_policy.is_empty() { None } else { Some(serde_json::to_string(tool_policy).map_err(|e| e.to_string())?) };
         let name = name.trim();
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -304,10 +308,11 @@ impl GatewayStore {
         }
         let model = if model.trim().is_empty() { "auto" } else { model.trim() };
         let skills_json = serde_json::to_string(skills).map_err(|e| e.to_string())?;
+        let mcp_json = serde_json::to_string(&mcp).map_err(|e| e.to_string())?;
         let updated_at = now();
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO agents (name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR REPLACE INTO agents (name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy, mcp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 name,
                 description.trim(),
@@ -319,6 +324,7 @@ impl GatewayStore {
                 i64::from(enabled),
                 updated_at,
                 policy_json,
+                mcp_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -327,6 +333,7 @@ impl GatewayStore {
             description: description.trim().to_string(),
             model: model.to_string(),
             skills: skills.to_vec(),
+            mcp,
             personality: personality.trim().to_string(),
             temperature,
             max_tokens,
@@ -342,6 +349,79 @@ impl GatewayStore {
         Ok(rows > 0)
     }
 
+    // ---- Teams (a roster of agents the user assembled) -------------
+    pub fn list_teams(&self) -> Vec<TeamRecord> {
+        let conn = self.conn.lock();
+        query_rows(&conn, "SELECT id, name, lead, members, updated_at FROM teams ORDER BY name ASC, id ASC", [], |r| {
+            Ok(TeamRecord {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                lead: r.get(2)?,
+                members: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+                updated_at: r.get(4)?,
+            })
+        })
+    }
+
+    pub fn get_team(&self, id: &str) -> Option<TeamRecord> {
+        self.list_teams().into_iter().find(|t| t.id == id)
+    }
+
+    /// Saves a roster. `id` of `None` creates `tm_…`. An existing id is updated, so the name can
+    /// change without breaking sessions. Every member must already be a saved agent. An empty
+    /// `lead` uses the first member. Names may repeat; the id is what a session stores.
+    pub fn save_team(&self, id: Option<&str>, name: &str, lead: &str, members: &[String]) -> Result<TeamRecord, String> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err("Team name must be non-empty and use only letters, digits, '-' or '_'".into());
+        }
+        let mut roster = Vec::new();
+        for raw in members {
+            let member = raw.trim();
+            if member.is_empty() || roster.iter().any(|m: &String| m == member) {
+                continue;
+            }
+            if self.get_agent(member).is_none() {
+                return Err(format!("No agent named '{member}'"));
+            }
+            if roster.len() == 12 {
+                return Err("A team can have at most 12 agents".into());
+            }
+            roster.push(member.to_string());
+        }
+        if roster.is_empty() {
+            return Err("A team needs at least one agent".into());
+        }
+        let lead = if lead.trim().is_empty() { roster[0].clone() } else { lead.trim().to_string() };
+        if !roster.iter().any(|m| m == &lead) {
+            return Err("The lead must be one of the team's agents".into());
+        }
+        let id = match id.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(existing) => {
+                if self.get_team(existing).is_none() {
+                    return Err(format!("Team '{existing}' not found"));
+                }
+                existing.to_string()
+            }
+            None => format!("tm_{}", &Uuid::new_v4().simple().to_string()[..12]),
+        };
+        let members_json = serde_json::to_string(&roster).map_err(|e| e.to_string())?;
+        let updated_at = now();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO teams (id, name, lead, members, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, name, lead, members_json, updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(TeamRecord { id, name: name.to_string(), lead, members: roster, updated_at })
+    }
+
+    pub fn delete_team(&self, id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock();
+        let rows = conn.execute("DELETE FROM teams WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+        Ok(rows > 0)
+    }
+
     // ---- Sessions (Conversation Memory) ----------------------------
     pub fn get_session_messages(&self, id: &str) -> Vec<Value> {
         let conn = self.conn.lock();
@@ -354,8 +434,29 @@ impl GatewayStore {
         let trimmed = if messages.len() > 40 { &messages[messages.len() - 40..] } else { messages };
         let json = serde_json::to_string(trimmed).map_err(|e| e.to_string())?;
         let conn = self.conn.lock();
-        conn.execute("INSERT OR REPLACE INTO sessions (id, messages, updated_at) VALUES (?1, ?2, ?3)", params![id, json, now()])
-            .map_err(|e| e.to_string())?;
+        // Keep the roster binding. INSERT OR REPLACE would otherwise reset the new `team` column.
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, messages, updated_at, team) VALUES (?1, ?2, ?3, (SELECT team FROM sessions WHERE id = ?1))",
+            params![id, json, now()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The roster this session uses, if one was bound with `x-eay-team`.
+    pub fn session_team(&self, id: &str) -> Option<String> {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT team FROM sessions WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0)).ok().flatten()
+    }
+
+    /// Remembers which roster a session uses. Creates the session row when the chat has not started yet.
+    pub fn set_session_team(&self, id: &str, team: &str) -> Result<(), String> {
+        let conn = self.conn.lock();
+        let updated = conn.execute("UPDATE sessions SET team = ?2 WHERE id = ?1", params![id, team]).map_err(|e| e.to_string())?;
+        if updated == 0 {
+            conn.execute("INSERT INTO sessions (id, messages, updated_at, team) VALUES (?1, '[]', ?2, ?3)", params![id, now(), team])
+                .map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -365,7 +466,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, json_array_length(messages), updated_at FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+            "SELECT id, json_array_length(messages), updated_at, team FROM sessions ORDER BY updated_at DESC LIMIT ?1",
             params![limit as i64],
             |r| {
                 let id: String = r.get(0)?;
@@ -381,6 +482,7 @@ impl GatewayStore {
                 Ok(serde_json::json!({
                     "id": id, "session": name, "owner": owner,
                     "messages": r.get::<_, i64>(1)?, "updated_at": r.get::<_, f64>(2)?,
+                    "team": r.get::<_, Option<String>>(3)?,
                 }))
             },
         )
@@ -569,4 +671,26 @@ impl GatewayStore {
             gemini_oauth_configured: configured,
         }
     }
+}
+
+/// Names of MCP servers an agent may use. `*` means every enabled server. Duplicates are dropped.
+fn clean_mcp_names(names: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for raw in names {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name != "*" && !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("MCP server name '{name}' must use only letters, digits, '-' or '_'"));
+        }
+        if out.iter().any(|s: &String| s == name) {
+            continue;
+        }
+        if out.len() == 20 {
+            return Err("An agent can list at most 20 MCP servers".into());
+        }
+        out.push(name.to_string());
+    }
+    Ok(out)
 }

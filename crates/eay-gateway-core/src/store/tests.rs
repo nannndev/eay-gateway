@@ -11,6 +11,35 @@ fn account_enabled(store: &GatewayStore, id: &str) -> Option<bool> {
     store.list_accounts().into_iter().find(|a| a.id == id).map(|a| a.enabled)
 }
 
+mod teams {
+    use super::*;
+
+    #[test]
+    fn a_team_saved_under_its_name_keeps_that_name_and_sessions_follow_the_new_id() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE teams (
+                    name TEXT PRIMARY KEY, lead TEXT NOT NULL, members TEXT NOT NULL, updated_at REAL NOT NULL
+                );
+                INSERT INTO teams VALUES ('app', 'lead', '[\"lead\"]', 1);
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY, messages TEXT NOT NULL DEFAULT '[]', updated_at REAL NOT NULL, team TEXT
+                );
+                INSERT INTO sessions VALUES ('local:s1', '[]', 1, 'app');",
+            )
+            .unwrap();
+        }
+        let store = GatewayStore::new(dir.path()).unwrap();
+        let teams = store.list_teams();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].name, "app");
+        assert!(teams[0].id.starts_with("tm_"), "{}", teams[0].id);
+        assert_eq!(store.session_team("local:s1").as_deref(), Some(teams[0].id.as_str()));
+    }
+}
+
 mod accounts {
     use super::*;
 
@@ -197,6 +226,8 @@ mod virtual_keys {
             status_code: 200,
             error: None,
             streaming: false,
+            agent: None,
+            team: None,
         });
         assert_eq!(s.key_requests_since(&rec.id, now() - 60.0), 1);
     }
@@ -275,6 +306,8 @@ mod analytics {
             status_code,
             error: None,
             streaming: false,
+            agent: None,
+            team: None,
         });
     }
 
@@ -330,6 +363,8 @@ mod analytics {
             status_code: 200,
             error: None,
             streaming: false,
+            agent: None,
+            team: None,
         });
         assert_eq!(s.analytics(Some(1), 0)["days"][0]["cost"], 2.0);
     }
@@ -350,6 +385,8 @@ mod analytics {
             status_code: 200,
             error: None,
             streaming: false,
+            agent: None,
+            team: None,
         });
         assert_eq!(s.analytics(Some(1), 0)["days"][0]["cached"], 6);
     }
@@ -359,6 +396,57 @@ mod analytics {
         let (s, _d) = store();
         log(&s, "codex", 5, 200);
         assert_eq!(s.analytics(Some(1), 0)["top_models"][0]["tokens"], 5);
+    }
+
+    fn log_who(s: &GatewayStore, agent: Option<&str>, team: Option<&str>, provider: &str, model: &str, tokens: i64) {
+        s.record_usage(&UsageEntry {
+            key_id: None,
+            key_name: None,
+            provider: Some(provider),
+            model: Some(model),
+            input_tokens: tokens,
+            output_tokens: 0,
+            cached_tokens: 0,
+            duration_ms: 1,
+            status: "success",
+            status_code: 200,
+            error: None,
+            streaming: false,
+            agent,
+            team,
+        });
+    }
+
+    #[test]
+    fn analytics_splits_agents_and_teams_and_lists_their_models() {
+        let (s, _d) = store();
+        let policy = crate::mcp::ToolPolicy::default();
+        s.save_agent("reviewer", "", "auto", &[], "", None, None, &policy, true, &[]).unwrap();
+        s.save_agent("tester", "", "auto", &[], "", None, None, &policy, true, &[]).unwrap();
+        let team = s.save_team(None, "app", "reviewer", &["reviewer".into(), "tester".into()]).unwrap();
+        log_who(&s, Some("reviewer"), Some(&team.id), "claude", "claude-sonnet-4.5", 30);
+        log_who(&s, Some("reviewer"), Some(&team.id), "codex", "gpt-5.5", 10);
+        log_who(&s, Some("tester"), Some(&team.id), "claude", "claude-sonnet-4.5", 20);
+        log_who(&s, None, Some(&team.id), "openai", "gpt-4.1", 5);
+        log_who(&s, Some("reviewer"), None, "claude", "claude-sonnet-4.5", 7);
+        log_who(&s, None, None, "codex", "m", 1);
+
+        let report = s.analytics(None, 0);
+        let agents = report["agents"].as_array().unwrap();
+        assert_eq!(agents[0]["agent"], "reviewer");
+        assert_eq!(agents[0]["tokens"], 47);
+        assert_eq!(agents[0]["models"].as_array().unwrap().len(), 2);
+        assert_eq!(agents[0]["models"][0]["model"], "claude-sonnet-4.5");
+        assert_eq!(agents.len(), 2);
+
+        let teams = &report["teams"][0];
+        assert_eq!(teams["id"], team.id);
+        assert_eq!(teams["name"], "app");
+        assert_eq!(teams["tokens"], 65);
+        assert_eq!(teams["agents"].as_array().unwrap().len(), 2);
+        assert_eq!(teams["agents"][0]["agent"], "reviewer");
+        assert_eq!(teams["agents"][0]["tokens"], 40);
+        assert_eq!(teams["models"].as_array().unwrap().len(), 3);
     }
 }
 
@@ -379,6 +467,8 @@ mod stats {
             status_code: code,
             error: None,
             streaming: false,
+            agent: None,
+            team: None,
         });
     }
 
