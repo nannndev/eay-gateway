@@ -79,9 +79,28 @@ pub struct ActivityHub {
     /// Caps concurrent subagents so one prompt cannot fan out into hundreds of upstream calls.
     pub slots: Arc<tokio::sync::Semaphore>,
     done: Arc<tokio::sync::Notify>,
+    approvals: Arc<Mutex<HashMap<String, PendingSlot>>>,
 }
 
 pub const MAX_CONCURRENT_SUBAGENTS: usize = 8;
+
+/// A tool call waiting for a person to approve or deny it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingApproval {
+    pub id: String,
+    /// The request or subagent run that wants to call the tool.
+    pub run_id: String,
+    pub agent: Option<String>,
+    pub tool: String,
+    pub arguments: Value,
+    pub created_at: f64,
+    pub expires_at: f64,
+}
+
+type PendingSlot = (PendingApproval, tokio::sync::oneshot::Sender<bool>);
+
+/// How long a tool call waits for approval before it counts as denied.
+pub const APPROVAL_TIMEOUT_SECS: u64 = 300;
 
 impl Default for ActivityHub {
     fn default() -> Self {
@@ -93,6 +112,7 @@ impl Default for ActivityHub {
             tasks: Default::default(),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBAGENTS)),
             done: Default::default(),
+            approvals: Default::default(),
         }
     }
 }
@@ -108,7 +128,13 @@ impl ActivityHub {
 
     pub fn emit(&self, ev: ActivityEvent) {
         if let Some(run) = self.runs.lock().get_mut(&ev.id) {
-            run.phase = ev.phase.clone();
+            // A run is over only when finish_run/cancel_run says so. The per-request
+            // `completed`/`failed` events also fire for each turn inside a run (tool loops,
+            // delegate), and must not end the run early.
+            let terminal = matches!(ev.phase.as_str(), "completed" | "failed" | "cancelled");
+            if !terminal && !run.is_finished() {
+                run.phase = ev.phase.clone();
+            }
             run.status_message = ev.message.clone();
             if ev.target.is_some() {
                 run.target = ev.target.clone();
@@ -205,6 +231,66 @@ impl ActivityHub {
         let parent = parent_id.as_deref().or(parent_session.as_deref());
         self.emit_phase(&id, parent, Some(&role), "queued", format!("Queued subagent '{role}'"), None, None);
         run
+    }
+
+    /// Parks a tool call until someone approves or denies it, or it times out (= denied).
+    /// Emits `awaiting_approval` with the approval id so a console can show it.
+    pub async fn request_approval(&self, run_id: &str, parent: Option<&str>, agent: Option<&str>, tool: &str, arguments: Value) -> bool {
+        self.request_approval_for(run_id, parent, agent, tool, arguments, std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)).await
+    }
+
+    pub async fn request_approval_for(
+        &self,
+        run_id: &str,
+        parent: Option<&str>,
+        agent: Option<&str>,
+        tool: &str,
+        arguments: Value,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let id = format!("apr_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let created_at = now();
+        let pending = PendingApproval {
+            id: id.clone(),
+            run_id: run_id.to_string(),
+            agent: agent.map(String::from),
+            tool: tool.to_string(),
+            arguments,
+            created_at,
+            expires_at: created_at + timeout.as_secs_f64(),
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.approvals.lock().insert(id.clone(), (pending, tx));
+        self.emit_with_meta(
+            run_id,
+            parent,
+            agent,
+            "awaiting_approval",
+            format!("Waiting for approval to run `{tool}` ({id})"),
+            None,
+            Some(tool),
+            None,
+        );
+        let approved = matches!(tokio::time::timeout(timeout, rx).await, Ok(Ok(true)));
+        self.approvals.lock().remove(&id);
+        let (phase, msg) =
+            if approved { ("approved", format!("Approved `{tool}`")) } else { ("denied", format!("Did not run `{tool}`: not approved")) };
+        self.emit_phase(run_id, parent, agent, phase, msg, None, Some(tool));
+        approved
+    }
+
+    pub fn list_approvals(&self) -> Vec<PendingApproval> {
+        let mut v: Vec<PendingApproval> = self.approvals.lock().values().map(|(p, _)| p.clone()).collect();
+        v.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+
+    /// Answers a pending approval; false if it is unknown or already answered or expired.
+    pub fn resolve_approval(&self, id: &str, approve: bool) -> bool {
+        match self.approvals.lock().remove(id) {
+            Some((_, tx)) => tx.send(approve).is_ok(),
+            None => false,
+        }
     }
 
     pub fn attach_task(&self, id: &str, handle: tokio::task::AbortHandle) {

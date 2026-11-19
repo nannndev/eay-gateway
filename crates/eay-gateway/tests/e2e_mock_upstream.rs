@@ -39,9 +39,29 @@ async fn chat(State(seen): State<Seen>, Json(body): Json<Value>) -> Response {
     let tool_result = body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "tool")).map(|m| m["content"].clone());
     let wants_tool =
         body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "get_weather")) && tool_result.is_none();
-    // Gateway-side MCP loop: call the first offered MCP tool, then echo what it returned.
-    let mcp_tool =
-        body["tools"].as_array().and_then(|t| t.iter().find_map(|t| t["function"]["name"].as_str().filter(|n| n.starts_with("mcp__"))));
+    // Gateway-side tool loop: call the first offered MCP tool (or `eay_delegate`), then echo what
+    // it returned. A subagent's task text starts with "SUB:", and it just answers "sub done".
+    let user_text =
+        body["messages"].as_array().and_then(|m| m.iter().find(|m| m["role"] == "user")).and_then(|m| m["content"].as_str()).unwrap_or("");
+    // A subagent answers directly (it may be offered `delegate` too, but does not use it).
+    if user_text.starts_with("SUB:") && tool_result.is_none() {
+        return (
+            [("content-type", "text/event-stream")],
+            sse(&[chunk(json!({ "role": "assistant", "content": "sub done" }), Some("stop"))]),
+        )
+            .into_response();
+    }
+    let mcp_tool = body["tools"]
+        .as_array()
+        .and_then(|t| t.iter().find_map(|t| t["function"]["name"].as_str().filter(|n| n.starts_with("mcp__") || *n == "eay_delegate")));
+    if mcp_tool == Some("eay_delegate") && tool_result.is_none() && !user_text.starts_with("SUB:") {
+        // "LOOP" keeps delegating at every level; anything else delegates once.
+        let task = if user_text.starts_with("LOOP") { "LOOP" } else { "SUB: do part one" };
+        let args = json!({ "role": "Helper", "task": task }).to_string();
+        let delta = json!({ "role": "assistant", "tool_calls": [{ "index": 0, "id": "call_d", "type": "function",
+            "function": { "name": "eay_delegate", "arguments": args } }] });
+        return ([("content-type", "text/event-stream")], sse(&[chunk(delta, Some("tool_calls"))])).into_response();
+    }
     if let Some(name) = mcp_tool {
         let delta = match &tool_result {
             Some(out) => json!({ "role": "assistant", "content": format!("tool said: {}", out.as_str().unwrap_or("")) }),
@@ -424,4 +444,123 @@ async fn tool_policies_limit_gateway_run_mcp_tools() {
     let keys: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let names: Vec<&str> = keys["keys"].as_array().unwrap().iter().filter_map(|k| k["name"].as_str()).collect();
     assert_eq!(names, ["ci"], "a rejected key must not be created");
+}
+
+async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
+    let resp = app.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+    let st = resp.status();
+    (st, serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn sessions_can_be_listed_and_read() {
+    let gw = gateway(false).await;
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-session-id", "chat-1")]).await;
+    let (st, list) = get_json(&gw.app, "/gateway/admin/sessions").await;
+    assert_eq!(st, StatusCode::OK);
+    let s = &list["sessions"][0];
+    assert_eq!(s["session"], "chat-1");
+    assert_eq!(s["owner"], "local");
+    assert_eq!(s["messages"], 2);
+
+    let (st, one) = get_json(&gw.app, &format!("/gateway/admin/sessions/{}", s["id"].as_str().unwrap())).await;
+    assert_eq!(st, StatusCode::OK, "{one}");
+    assert_eq!(one["messages"][1]["content"], "pong");
+    // A bare session name finds the local session too.
+    assert_eq!(get_json(&gw.app, "/gateway/admin/sessions/chat-1").await.0, StatusCode::OK);
+    assert_eq!(get_json(&gw.app, "/gateway/admin/sessions/nope").await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_model_can_delegate_to_a_subagent_when_its_agent_allows_it() {
+    let gw = gateway(false).await;
+    // Without max_subagents the model is not offered the delegate tool.
+    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "plain", "model": "auto" }), &[]).await;
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/plain", "messages": hello() }), &[]).await;
+    assert!(gw.seen.lock().unwrap().last().unwrap().get("tools").is_none());
+
+    let (st, body) =
+        post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[])
+            .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (st, body) = post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/lead", "messages": hello() }), &[]).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    // The lead's final answer echoes the subagent's result, which came back as the tool output.
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"], "tool said: sub done");
+
+    let (_, subs) = get_json(&gw.app, "/gateway/admin/subagents").await;
+    let sub = &subs["subagents"][0];
+    assert_eq!(sub["role"], "Helper");
+    assert_eq!(sub["phase"], "completed");
+    assert!(sub["parent_id"].as_str().unwrap().starts_with("req_"), "{sub}");
+    assert_eq!(subs["subagents"].as_array().unwrap().len(), 1, "the subagent did not start another one");
+}
+
+#[tokio::test]
+async fn delegation_stops_at_the_depth_limit() {
+    let gw = gateway(false).await;
+    // A model that always delegates: each level starts another, until the gateway stops offering it.
+    post_raw(&gw.app, "/gateway/admin/agents", json!({ "name": "loop", "model": "auto", "tool_policy": { "max_subagents": 5 } }), &[])
+        .await;
+    let (st, _) = post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "agent/loop", "messages": [{ "role": "user", "content": "LOOP" }] }),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, subs) = get_json(&gw.app, "/gateway/admin/subagents").await;
+    assert_eq!(subs["subagents"].as_array().unwrap().len(), 3, "MAX_DELEGATE_DEPTH levels, no more");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_approval_holds_a_tool_until_someone_answers() {
+    let gw = gateway(false).await;
+    post_raw(
+        &gw.app,
+        "/gateway/admin/mcp",
+        json!({ "name": "files", "transport": "stdio", "command": "sh", "args": ["-c", two_tool_mcp_script()] }),
+        &[],
+    )
+    .await;
+    post_raw(
+        &gw.app,
+        "/gateway/admin/agents",
+        json!({ "name": "careful", "model": "auto", "tool_policy": { "approval": "manual", "allow": ["files/write_file"] } }),
+        &[],
+    )
+    .await;
+
+    for (approve, expected) in [(true, "tool said: done"), (false, "The user did not approve")] {
+        let app = gw.app.clone();
+        let req = tokio::spawn(async move {
+            post_raw(&app, "/v1/chat/completions", json!({ "model": "agent/careful", "messages": hello() }), &[("x-eay-mcp", "files")])
+                .await
+        });
+        // Wait for the tool call to show up as pending, then answer it.
+        let mut id = None;
+        for _ in 0..50 {
+            let (_, list) = get_json(&gw.app, "/gateway/admin/approvals").await;
+            if let Some(a) = list["approvals"].as_array().and_then(|a| a.first()) {
+                assert_eq!(a["tool"], "mcp__files__write_file");
+                id = a["id"].as_str().map(String::from);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let id = id.expect("tool call never became pending");
+        let (st, _) = post_raw(&gw.app, &format!("/gateway/admin/approvals/{id}"), json!({ "approve": approve }), &[]).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, body) = req.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let answer = serde_json::from_str::<Value>(&body).unwrap()["choices"][0]["message"]["content"].as_str().unwrap().to_string();
+        assert!(answer.contains(expected), "approve={approve}: {answer}");
+        // Answering twice is refused.
+        assert_eq!(
+            post_raw(&gw.app, &format!("/gateway/admin/approvals/{id}"), json!({ "approve": true }), &[]).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
 }

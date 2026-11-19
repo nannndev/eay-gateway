@@ -480,6 +480,36 @@ pub async fn handle_delete_agent(State(engine): State<GatewayEngine>, Path(name)
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }
 
+#[derive(Deserialize)]
+pub struct ListQuery {
+    limit: Option<usize>,
+}
+
+/// Sessions with their message counts, newest first.
+pub async fn handle_list_sessions(State(engine): State<GatewayEngine>, Query(q): Query<ListQuery>) -> Json<Value> {
+    Json(json!({ "sessions": engine.store.list_sessions(q.limit.unwrap_or(100).min(1000)) }))
+}
+
+/// One session: its messages and the subagents that ran in it. `id` is the full storage id from
+/// the list (`key:<key-id>:<session>` or `local:<session>`); a bare id means the local session.
+pub async fn handle_get_session(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Result<Json<Value>, GatewayError> {
+    let storage = if engine.store.session_updated_at(&id).is_some() { id } else { eay_gateway_core::engine::session_storage_id(None, &id) };
+    let updated_at = engine.store.session_updated_at(&storage).ok_or_else(|| GatewayError::NotFound("Session not found".into()))?;
+    let name = storage.rsplit(':').next().unwrap_or(&storage).to_string();
+    let subagents: Vec<Value> = engine
+        .activity
+        .list_runs()
+        .into_iter()
+        .filter(|r| r.parent_session.as_deref() == Some(name.as_str()))
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .collect();
+    Ok(Json(json!({
+        "id": storage, "session": name, "updated_at": updated_at,
+        "messages": engine.store.get_session_messages(&storage),
+        "subagents": subagents,
+    })))
+}
+
 pub async fn handle_delete_session(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
     // Admin can pass a full storage id (`key:<id>:<sid>`) or a bare id for local (no-key) sessions.
     let raw = engine.store.delete_session(&id).unwrap_or(false);
@@ -583,6 +613,27 @@ pub async fn handle_get_subagent(
     };
     let run = run.ok_or_else(|| GatewayError::NotFound("Subagent not found".into()))?;
     Ok(Json(json!({ "subagent": run })))
+}
+
+/// Tool calls waiting for a person (`approval: manual` or `manual_for_writes`).
+pub async fn handle_list_approvals(State(engine): State<GatewayEngine>) -> Json<Value> {
+    Json(json!({ "approvals": engine.activity.list_approvals() }))
+}
+
+#[derive(Deserialize)]
+pub struct ApprovalDecision {
+    approve: bool,
+}
+
+pub async fn handle_resolve_approval(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Json(d): Json<ApprovalDecision>,
+) -> Result<Json<Value>, GatewayError> {
+    if !engine.activity.resolve_approval(&id, d.approve) {
+        return Err(GatewayError::NotFound("No pending approval with that id (already answered or expired)".into()));
+    }
+    Ok(Json(json!({ "status": if d.approve { "approved" } else { "denied" } })))
 }
 
 pub async fn handle_cancel_subagent(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Result<Json<Value>, GatewayError> {

@@ -17,6 +17,64 @@ pub struct ChatOptions {
     pub mcp_servers: Vec<String>,
     pub run_id: Option<String>,
     pub agent_label: Option<String>,
+    /// Policy inherited from the agent that started this run (a subagent may never get more
+    /// than its parent). Applied on top of the agent's and key's own policies.
+    pub inherited_policy: Option<crate::mcp::ToolPolicy>,
+    /// How many levels of `delegate` led to this run (0 = a request from a client).
+    pub depth: u32,
+}
+
+/// How long a `delegate` call waits for its subagent.
+const DELEGATE_WAIT_SECS: u64 = 600;
+
+/// One policy at least as strict as every one of `policies`, handed to subagents so they never get
+/// more than their parent: the strictest mode and approval, allow lists intersected (a pattern
+/// survives only if every list has it), all denies, and the smallest subagent budget.
+fn combine_policies(policies: &[&crate::mcp::ToolPolicy]) -> crate::mcp::ToolPolicy {
+    let rank_mode = |m: Option<&str>| match m {
+        Some("none") => 2,
+        Some("read_only") => 1,
+        _ => 0,
+    };
+    let rank_approval = |a: Option<&str>| match a {
+        Some("manual") => 2,
+        Some("manual_for_writes") => 1,
+        _ => 0,
+    };
+    let mode = policies.iter().map(|p| p.mode.as_deref()).max_by_key(|m| rank_mode(*m)).flatten().map(String::from);
+    let approval = policies.iter().map(|p| p.approval.as_deref()).max_by_key(|a| rank_approval(*a)).flatten().map(String::from);
+    let allows: Vec<&Vec<String>> = policies.iter().filter_map(|p| p.allow.as_ref()).collect();
+    // Intersect allow lists by pattern text; patterns that differ in form are kept conservatively.
+    let allow = allows.split_first().map(|(first, rest)| first.iter().filter(|a| rest.iter().all(|r| r.contains(a))).cloned().collect());
+    let mut deny: Vec<String> = policies.iter().flat_map(|p| p.deny.iter().cloned()).collect();
+    deny.sort();
+    deny.dedup();
+    let max_subagents = policies.iter().filter_map(|p| p.max_subagents).min();
+    crate::mcp::ToolPolicy { mode, allow, deny, approval, max_subagents }
+}
+
+/// Name of the gateway-provided tool that lets a model start subagents.
+pub const DELEGATE_TOOL: &str = "eay_delegate";
+/// Deepest chain of subagents a model may build with `delegate`.
+pub const MAX_DELEGATE_DEPTH: u32 = 3;
+
+fn delegate_tool_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": DELEGATE_TOOL,
+            "description": "Hand an independent subtask to a subagent and get its final answer back. Use it for work that can be done separately (research one topic, review one file). Give the subagent everything it needs in `task`; it cannot see this conversation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "description": "Short role, e.g. 'Test writer'" },
+                    "task": { "type": "string", "description": "Complete instructions for the subagent" },
+                    "model": { "type": "string", "description": "Optional model id; defaults to this request's model" }
+                },
+                "required": ["role", "task"]
+            }
+        }
+    })
 }
 
 use self::routing::{cool_key, cooldown_for, filter_multimodal_targets};
@@ -516,12 +574,32 @@ impl GatewayEngine {
         let caller_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
         let mcp_records = self.resolve_mcp_servers(&opts.mcp_servers);
-        if !mcp_records.is_empty() {
+        // The agent's, the key's and the parent run's tool policies all apply; the strictest wins.
+        let key_policy = key.as_ref().map(|k| k.tool_policy.clone()).unwrap_or_default();
+        let inherited = opts.inherited_policy.clone().unwrap_or_default();
+        let policies = [&agent_tool_policy, &key_policy, &inherited];
+        // `delegate` is offered only when some policy turns it on, never past the depth limit, and a
+        // subagent never gets a bigger budget than its parent had.
+        let delegate_budget = if opts.depth >= MAX_DELEGATE_DEPTH {
+            0
+        } else {
+            let own = crate::mcp::subagent_budget(&[&agent_tool_policy, &key_policy]);
+            match opts.inherited_policy.as_ref().and_then(|p| p.max_subagents) {
+                // A subagent's own agent/key may lower the budget, never raise it.
+                Some(parent) if own > 0 => own.min(parent),
+                Some(parent) => parent,
+                None => own,
+            }
+        };
+        if !mcp_records.is_empty() || delegate_budget > 0 {
             let mut merged_tools = body.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default();
             let mut mcp_index = crate::mcp::McpToolIndex::default();
-            // The agent's and the key's tool policies both apply; the stricter one wins.
-            let key_policy = key.as_ref().map(|k| k.tool_policy.clone()).unwrap_or_default();
-            let policies = [&agent_tool_policy, &key_policy];
+            if delegate_budget > 0 {
+                merged_tools.push(delegate_tool_schema());
+            }
+            let mut delegated: u32 = 0;
+            // What a subagent started here may do: the strictest of everything above, one level deeper.
+            let child_policy = combine_policies(&policies);
             for srv in &mcp_records {
                 let (tools, index) = self.mcp_tools_cached(srv).await;
                 for t in tools {
@@ -556,7 +634,7 @@ impl GatewayEngine {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter(|tc| tc["function"]["name"].as_str().is_some_and(|n| mcp_index.resolve(n).is_some()))
+                        .filter(|tc| tc["function"]["name"].as_str().is_some_and(|n| n == DELEGATE_TOOL || mcp_index.resolve(n).is_some()))
                         .cloned()
                         .collect();
                     if mcp_calls.is_empty() {
@@ -574,10 +652,42 @@ impl GatewayEngine {
                             let full_name = tc["function"]["name"].as_str().unwrap_or("");
                             let args: Value =
                                 serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
+                            if full_name == DELEGATE_TOOL {
+                                let output = if delegated >= delegate_budget {
+                                    format!("Subagent limit reached ({delegate_budget} per request). Do the rest yourself.")
+                                } else {
+                                    delegated += 1;
+                                    self.run_delegate(
+                                        key.clone(),
+                                        &args,
+                                        &req_model,
+                                        &run_id,
+                                        agent_label.as_deref(),
+                                        &child_policy,
+                                        opts.depth,
+                                        &opts.mcp_servers,
+                                    )
+                                    .await
+                                };
+                                msgs.push(json!({ "role": "tool", "tool_call_id": call_id, "content": output }));
+                                continue;
+                            }
                             // Re-check at run time: a model can name a tool it was never offered.
-                            let permitted = mcp_index.get(full_name).is_some_and(|r| crate::mcp::all_permit(&policies, r));
-                            let output = if !permitted {
+                            let tool_ref = mcp_index.get(full_name).filter(|r| crate::mcp::all_permit(&policies, r)).cloned();
+                            let approved = match &tool_ref {
+                                Some(r) if crate::mcp::any_needs_approval(&policies, r.read_only) => {
+                                    self.activity
+                                        .request_approval(&run_id, parent_id.as_deref(), agent_label.as_deref(), full_name, args.clone())
+                                        .await
+                                }
+                                _ => true,
+                            };
+                            let output = if tool_ref.is_none() {
                                 format!("Tool `{full_name}` is not allowed for this agent or key.")
+                            } else if !approved {
+                                format!(
+                                    "The user did not approve running `{full_name}`. Do not retry it; continue without it or ask the user."
+                                )
                             } else if let Some((srv_name, tool_name)) = mcp_index.resolve(full_name) {
                                 let (mut meta, msg_label) = build_tool_activity_meta(full_name, &args);
                                 let t_tool = std::time::Instant::now();
@@ -927,6 +1037,44 @@ impl GatewayEngine {
         run
     }
 
+    /// Runs one `delegate` tool call: starts a subagent one level deeper, under the same key, with
+    /// at most the parent's permissions, waits for it, and returns its answer as the tool result.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_delegate(
+        &self,
+        key: Option<VirtualKeyRecord>,
+        args: &Value,
+        default_model: &str,
+        parent_run: &str,
+        parent_agent: Option<&str>,
+        child_policy: &crate::mcp::ToolPolicy,
+        depth: u32,
+        mcp_servers: &[String],
+    ) -> String {
+        let task = args["task"].as_str().unwrap_or("").trim();
+        if task.is_empty() {
+            return "delegate needs a non-empty `task`.".into();
+        }
+        let role = args["role"].as_str().filter(|r| !r.trim().is_empty()).unwrap_or("Subagent").to_string();
+        let model = args["model"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or(default_model).to_string();
+        let opts = ChatOptions {
+            mcp_servers: mcp_servers.to_vec(),
+            inherited_policy: Some(child_policy.clone()),
+            depth: depth + 1,
+            ..Default::default()
+        };
+        let system = parent_agent.map(|a| format!("You are a subagent started by {a}. Finish the task and reply with the result only."));
+        let run = self.spawn_subagent(key, role.clone(), model, task.to_string(), system, Some(parent_run.to_string()), opts);
+        match self.activity.wait_run(&run.id, std::time::Duration::from_secs(DELEGATE_WAIT_SECS)).await {
+            Some(r) if r.phase == "completed" => r.output.unwrap_or_default(),
+            Some(r) if r.is_finished() => format!("Subagent '{role}' {}: {}", r.phase, r.error.unwrap_or_default()),
+            _ => {
+                self.activity.cancel_run(&run.id);
+                format!("Subagent '{role}' did not finish within {DELEGATE_WAIT_SECS}s and was stopped.")
+            }
+        }
+    }
+
     /// Loads saved subagent history into the live hub; call once at startup.
     pub fn restore_subagent_history(&self) {
         self.activity.restore_runs(self.store.list_subagent_runs(200));
@@ -1150,6 +1298,37 @@ mod tests {
         assert!(e.admit_rate(Some(&k)).is_ok());
         assert_eq!(e.admit_rate(Some(&k)).unwrap_err().status, 429);
         assert!(e.admit_rate(None).is_ok());
+    }
+
+    #[test]
+    fn a_child_policy_is_at_least_as_strict_as_every_parent_policy() {
+        use crate::mcp::{McpToolRef, ToolPolicy};
+        let agent = ToolPolicy { allow: Some(vec!["fs/*".into(), "github/*".into()]), max_subagents: Some(5), ..Default::default() };
+        let key = ToolPolicy {
+            mode: Some("read_only".into()),
+            deny: vec!["secret".into()],
+            approval: Some("manual_for_writes".into()),
+            allow: Some(vec!["fs/*".into()]),
+            max_subagents: Some(2),
+        };
+        let child = combine_policies(&[&agent, &key]);
+        assert_eq!(child.mode.as_deref(), Some("read_only"));
+        assert_eq!(child.approval.as_deref(), Some("manual_for_writes"));
+        assert_eq!(child.allow, Some(vec!["fs/*".to_string()]), "allow lists intersect");
+        assert_eq!(child.deny, ["secret"]);
+        assert_eq!(child.max_subagents, Some(2));
+        // Whatever the parents forbid, the child forbids.
+        let gh = McpToolRef { server: "github".into(), tool: "x".into(), read_only: true };
+        assert!(!key.permits(&gh) && !child.permits(&gh));
+        assert_eq!(combine_policies(&[&ToolPolicy::default()]), ToolPolicy::default());
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_approval_counts_as_denied() {
+        let (e, _d) = engine();
+        let approved = e.activity.request_approval_for("r", None, None, "t", json!({}), std::time::Duration::from_millis(50)).await;
+        assert!(!approved);
+        assert!(e.activity.list_approvals().is_empty(), "expired approvals are removed");
     }
 
     /// OpenAI (with one custom model) and DeepSeek connected by API key.

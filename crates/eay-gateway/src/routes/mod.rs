@@ -245,13 +245,16 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/skills/:name/toggle", patch(admin::handle_toggle_skill))
         .route("/gateway/admin/agents", get(admin::handle_list_agents).post(admin::handle_save_agent))
         .route("/gateway/admin/agents/:name", put(admin::handle_put_agent).delete(admin::handle_delete_agent))
-        .route("/gateway/admin/sessions/:id", delete(admin::handle_delete_session))
+        .route("/gateway/admin/sessions", get(admin::handle_list_sessions))
+        .route("/gateway/admin/sessions/:id", get(admin::handle_get_session).delete(admin::handle_delete_session))
         // Live Activity & Subagents
         .route("/gateway/admin/events", get(admin::handle_activity_events))
         .route("/gateway/admin/activity", get(admin::handle_activity_snapshot))
         .route("/gateway/admin/subagents", get(admin::handle_list_subagents).post(admin::handle_spawn_subagent))
         .route("/gateway/admin/subagents/:id", get(admin::handle_get_subagent).delete(admin::handle_delete_subagent))
         .route("/gateway/admin/subagents/:id/cancel", post(admin::handle_cancel_subagent))
+        .route("/gateway/admin/approvals", get(admin::handle_list_approvals))
+        .route("/gateway/admin/approvals/:id", post(admin::handle_resolve_approval))
         // External MCP Connectors
         .route("/gateway/admin/mcp", get(admin::handle_list_mcp).post(admin::handle_save_mcp))
         .route("/gateway/admin/mcp/import", post(admin::handle_import_mcp))

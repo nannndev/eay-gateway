@@ -359,6 +359,38 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Sessions, newest first: storage id, message count and last update. Message bodies are not
+    /// loaded, so listing stays cheap however long the conversations are.
+    pub fn list_sessions(&self, limit: usize) -> Vec<Value> {
+        let conn = self.conn.lock();
+        query_rows(
+            &conn,
+            "SELECT id, json_array_length(messages), updated_at FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+            params![limit as i64],
+            |r| {
+                let id: String = r.get(0)?;
+                // `key:<key-id>:<sid>` or `local:<sid>`; older ids have no prefix.
+                let (owner, name) = match id.split_once(':') {
+                    Some(("local", rest)) => ("local".to_string(), rest.to_string()),
+                    Some(("key", rest)) => match rest.split_once(':') {
+                        Some((k, s)) => (format!("key:{k}"), s.to_string()),
+                        None => ("unknown".to_string(), rest.to_string()),
+                    },
+                    _ => ("legacy".to_string(), id.clone()),
+                };
+                Ok(serde_json::json!({
+                    "id": id, "session": name, "owner": owner,
+                    "messages": r.get::<_, i64>(1)?, "updated_at": r.get::<_, f64>(2)?,
+                }))
+            },
+        )
+    }
+
+    pub fn session_updated_at(&self, id: &str) -> Option<f64> {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT updated_at FROM sessions WHERE id = ?1", params![id], |r| r.get(0)).ok()
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<bool, String> {
         let conn = self.conn.lock();
         let rows = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;

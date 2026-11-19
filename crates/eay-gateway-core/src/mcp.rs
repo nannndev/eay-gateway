@@ -78,14 +78,35 @@ pub struct ToolPolicy {
     /// These tools are never offered (same patterns as `allow`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// `auto` (default) runs tools at once; `manual` waits for a person to approve each call;
+    /// `manual_for_writes` approves only tools the server does not mark read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
+    /// Lets the model start subagents with the gateway's `delegate` tool, up to this many per
+    /// request (and never deeper than three levels). 0 or unset turns it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_subagents: Option<u32>,
 }
 
 impl ToolPolicy {
     /// Checks a `mode` value from an API request.
     pub fn validate(&self) -> Result<(), String> {
         match self.mode.as_deref() {
-            None | Some("all" | "read_only" | "none") => Ok(()),
-            Some(other) => Err(format!("unknown tool mode '{other}'; use all, read_only or none")),
+            None | Some("all" | "read_only" | "none") => {}
+            Some(other) => return Err(format!("unknown tool mode '{other}'; use all, read_only or none")),
+        }
+        match self.approval.as_deref() {
+            None | Some("auto" | "manual" | "manual_for_writes") => Ok(()),
+            Some(other) => Err(format!("unknown approval '{other}'; use auto, manual or manual_for_writes")),
+        }
+    }
+
+    /// Whether running this tool must wait for a person.
+    pub fn needs_approval(&self, read_only: bool) -> bool {
+        match self.approval.as_deref() {
+            Some("manual") => true,
+            Some("manual_for_writes") => !read_only,
+            _ => false,
         }
     }
 
@@ -117,6 +138,18 @@ impl ToolPolicy {
 /// the stricter of the two.
 pub fn all_permit(policies: &[&ToolPolicy], t: &McpToolRef) -> bool {
     policies.iter().all(|p| p.permits(t))
+}
+
+/// Approval is needed if any policy asks for it.
+pub fn any_needs_approval(policies: &[&ToolPolicy], read_only: bool) -> bool {
+    policies.iter().any(|p| p.needs_approval(read_only))
+}
+
+/// Subagents the model may start: the smallest limit any policy sets, 0 if any turns it off
+/// explicitly or none turns it on.
+pub fn subagent_budget(policies: &[&ToolPolicy]) -> u32 {
+    let set: Vec<u32> = policies.iter().filter_map(|p| p.max_subagents).collect();
+    set.iter().copied().min().unwrap_or(0)
 }
 
 /// Splits `mcp__<server>__<tool>` back into `(server, tool)`.
