@@ -56,9 +56,10 @@ pub fn parse_tool_name(full_name: &str) -> Option<(&str, &str)> {
 
 /// `Command` does not go through a shell, so `~/Desktop` would reach the server literally.
 fn expand_home(s: &str) -> String {
-    match (s.strip_prefix("~/"), std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))) {
-        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
-        _ if s == "~" => std::env::var("HOME").unwrap_or_else(|_| s.into()),
+    let home = || std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok();
+    match (s.strip_prefix("~/"), s == "~") {
+        (Some(rest), _) => home().map(|h| format!("{h}/{rest}")).unwrap_or_else(|| s.into()),
+        (None, true) => home().unwrap_or_else(|| s.into()),
         _ => s.into(),
     }
 }
@@ -600,8 +601,10 @@ done"#,
 
     #[test]
     fn expands_a_leading_tilde_only() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // Same lookup as the code: HOME, or USERPROFILE on Windows.
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap();
         assert_eq!(expand_home("~/Desktop"), format!("{home}/Desktop"));
+        assert_eq!(expand_home("~"), home);
         assert_eq!(expand_home("a~/b"), "a~/b");
         assert_eq!(expand_home("-y"), "-y");
     }
