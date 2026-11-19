@@ -5,6 +5,7 @@ All notable changes to **eay-gateway** are listed below.
 ## v0.3.0 — 2026-11-19
 
 ### Highlights
+- **Easy install:** Homebrew, Docker image, and `eay-gateway service install` to start at login; new [Integrations](integrations.md) guide.
 - **Safer by default:** admin API and MCP tools are loopback-only without an admin token (blocks DNS rebinding); new read-only admin token; session memory is private per key.
 - **Codex CLI works end to end:** `/v1/responses` streams real Responses events and carries function tools and tool-call history.
 - **Multi-agent:** cancel, join (`?wait=`), parent trees, MCP access and per-key limits for subagents; at most 8 at once; history survives restarts.

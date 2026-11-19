@@ -11,6 +11,8 @@
 | `--admin-read-token <T>` | `EAY_GATEWAY_ADMIN_READ_TOKEN` | off | Admin token that can only `GET` |
 | `--console-origin <O>` | `EAY_GATEWAY_CONSOLE_ORIGINS` | off | Browser origin(s), comma-separated, allowed to call the gateway (see below) |
 | `--idle-exit <MIN>` | | off | Exit after MIN minutes with no HTTP requests |
+| `-V`, `--version` | | | Print the version |
+| `service install\|uninstall\|status` | | | Start at login (see [Getting started](getting-started.md#start-at-login)) |
 | `-h`, `--help` | | | |
 
 ## Web console and browser access

@@ -1,0 +1,19 @@
+# docker compose up -d   → gateway on http://127.0.0.1:20129 (this machine only)
+# Set EAY_GATEWAY_ADMIN_TOKEN in a .env file next to this one; the admin API refuses
+# requests without it, because inside a container nothing looks like localhost.
+services:
+  eay-gateway:
+    image: ghcr.io/nannndev/eay-gateway:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:20129:20129"
+    environment:
+      EAY_GATEWAY_ADMIN_TOKEN: ${EAY_GATEWAY_ADMIN_TOKEN:?set EAY_GATEWAY_ADMIN_TOKEN in .env}
+      # Uncomment to use the hosted console:
+      # EAY_GATEWAY_CONSOLE_ORIGINS: https://nannndev.github.io
+    volumes:
+      - eay-data:/data
+
+volumes:
+  eay-data:

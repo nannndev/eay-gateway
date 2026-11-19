@@ -18,6 +18,7 @@ export default defineConfig({
       {
         text: 'Guides',
         items: [
+          { text: 'Integrations', link: '/integrations' },
           { text: 'Routing & Failover', link: '/routing' },
           { text: 'Providers & Logins', link: '/providers' },
           { text: 'Configuration', link: '/configuration' },
@@ -38,6 +39,7 @@ export default defineConfig({
         text: 'Getting Started',
         items: [
           { text: 'Quick Start', link: '/getting-started' },
+          { text: 'Integrations', link: '/integrations' },
           { text: 'Configuration', link: '/configuration' },
         ],
       },

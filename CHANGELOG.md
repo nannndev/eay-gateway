@@ -10,6 +10,8 @@ All notable changes to `eay-gateway` are documented in this file.
 - `x-eay-session-id` memory is private to each virtual key (and to the no-key local caller).
 
 ### Added
+- **Install and run:** Homebrew formula (`brew install nannndev/tap/eay-gateway`), a container image on `ghcr.io/nannndev/eay-gateway` (amd64/arm64) with `compose.yaml`, and `eay-gateway service install|uninstall|status` to start at login on macOS, Linux and Windows. `--version` flag.
+- **Integrations guide** for Claude Code, Codex, Cursor, Cline, SDKs, desktop and web apps.
 - Per-key `max_concurrent` (requests in flight; streamed responses hold their slot until they end).
 - Subagents: `POST /gateway/admin/subagents/:id/cancel`, `GET …/:id?wait=N` to join on a run, `parent_id`, `mcp`, `api_key` (runs under that key's limits), at most 8 running at once, history kept across restarts.
 - `x-eay-run-id` header to follow your own request on `/gateway/admin/events`.
