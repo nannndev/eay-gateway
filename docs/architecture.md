@@ -63,13 +63,22 @@ offered  = MCP tools every policy permits  (+ eay_delegate if max_subagents > 0 
 loop (max 8 rounds):
   model turn → tool calls?
     none          → reply to the client (and save the session)
-    eay_delegate  → spawn_subagent(same key, stricter child policy, depth + 1) → wait → result
+    eay_delegate  → spawn children in parallel (same key, stricter policy, depth + 1) → wait → result
     MCP tool      → still permitted?  → needs approval? → wait for POST /approvals/:id (5 min, else deny)
                                       → call_tool → result (images become image parts)
 ```
 
 A subagent is a background run with its own id, `parent_id` and `parent_session`. It takes one of
-8 slots, can be cancelled, and is saved to `subagent_runs` when it ends.
+8 slots, can be cancelled, and is saved to `subagent_runs` when it ends. Cancelling a run stops
+every run under it. A request that delegates is stored as the root of that tree. A saved agent
+delegates only when its own policy sets `max_subagents`. The lead and its workers share one
+in-memory thread (`eay_say`); other runs cannot read it. An agent's `mcp` list is added only when
+the request is allowed to run local MCP (loopback, same rule as `x-eay-mcp`).
+
+A saved **team** is a roster of agent names (`x-eay-team`), separate from that thread and from the
+subagents an agent starts. Its id (`tm_…`) stays put when the name changes. A session stores the
+chat and that id. Closing a session drops the chat only. Two sessions can use the same roster and
+do not see each other's messages.
 
 ## Storage
 

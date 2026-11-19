@@ -66,6 +66,7 @@ Forwards `multipart/form-data` audio uploads (`file`, `model`, …) to connected
 |---|---|
 | `x-eay-skills` | Comma-separated skill names to inject into the system prompt (alternative to `model+skill` suffix) |
 | `x-eay-session-id` | Works with streaming and non-streaming requests. Persist and replay conversation history for this session id in SQLite. Sessions are private to the caller: each virtual key (and the no-key local caller) has its own namespace, so the same id under two keys is two different sessions |
+| `x-eay-team` | Use this roster. Send the team id (`tm_…`), or its name when exactly one team has that name. The speaker must be one of its agents (`model: agent/<lead>`), and `eay_delegate` may name only the other members. Sent with a session id, the session stores the team id. Renaming the team does not drop the chat. A new session id starts an empty chat on the same roster. Two sessions may use one roster and do not share messages |
 | `x-eay-run-id` | Your own id for this request (≤64 chars, `[A-Za-z0-9_-]`), so you can follow it on `/gateway/admin/events` |
 | `x-eay-max-context-chars` | Trim older non-system messages when total characters exceed this limit |
 | `x-eay-redact` | Set to `true` or `1` to redact common API keys/tokens in user messages before forwarding upstream |
@@ -172,19 +173,22 @@ Without a token, `/gateway/admin/*` and the `x-eay-mcp` header only work when th
 | `PATCH /gateway/admin/skills/:name/toggle` | Enable / disable a skill |
 | `DELETE /gateway/admin/skills/:name` | Delete a skill |
 | `GET /gateway/admin/agents` | List saved Agent Personality profiles |
-| `POST /gateway/admin/agents` | `{"name":"senior-rust","model":"auto/coding","skills":["rust"],"personality":"…","temperature":0.2,"tool_policy":{"allow":["github/*"]}}` (usable via `model: "agent/senior-rust"`) |
+| `POST /gateway/admin/agents` | `{"name":"senior-rust","model":"auto/coding","skills":["rust"],"personality":"…","temperature":0.2,"mcp":["filesystem"],"tool_policy":{"allow":["github/*"],"max_subagents":3}}` (usable via `model: "agent/senior-rust"`). `mcp` is the servers this agent uses on a loopback request |
 | `PUT /gateway/admin/agents/:name` | Create or update agent by name |
 | `DELETE /gateway/admin/agents/:name` | Delete an agent profile |
-| `GET /gateway/admin/sessions` | Sessions, newest first: `id` (storage id), `session`, `owner` (`local` or `key:<id>`), message count, `updated_at`. `?limit=` (default 100) |
+| `GET /gateway/admin/teams` | Rosters you assembled: `id` (`tm_…`), `name`, `lead`, `members`. Names may repeat |
+| `POST /gateway/admin/teams` | `{"name":"app","lead":"lead","members":["lead","frontend","reviewer"]}`. Every member must already be a saved agent. The lead defaults to the first member. Send `id` to update that team, including a rename; omit `id` to create a new one |
+| `DELETE /gateway/admin/teams/:id` | Delete a roster. Sessions that used it are left in place; their next request reports the team as missing |
+| `GET /gateway/admin/sessions` | Sessions, newest first: `id` (storage id), `session`, `owner` (`local` or `key:<id>`), message count, `team` (roster name, if one was bound), `updated_at`. `?limit=` (default 100) |
 | `GET /gateway/admin/sessions/:id` | One session's `messages` and the `subagents` that ran in it. Use the `id` from the list; a bare session name finds the local (no-key) one |
 | `DELETE /gateway/admin/sessions/:id` | Clear saved conversation history for a session id |
 | `GET /gateway/admin/events` | SSE stream of real-time request & subagent activity phases (`queued`, `preparing`, `routing`, `waiting_upstream`, `thinking`, `calling_tool`, `awaiting_approval`, `approved`, `denied`, `generating`, `failover`, `completed`, `failed`, `cancelled`), including structured `meta` (`action`, `file`, `lines`, `added`, `removed`, `command`, `duration_ms`) |
 | `GET /gateway/admin/activity` | JSON snapshot of recent `events` and `subagents` |
 | `GET /gateway/admin/subagents` | List active and recent background subagent runs |
 | `POST /gateway/admin/subagents` | Spawn a background subagent `{"role":"Reviewer","model":"auto","prompt":"…","skills":[…],"mcp":["*"],"parent_id":"sub_…","api_key":"gw-sk-…"}`. `mcp` gives it MCP tools, `parent_id` links it into an agent tree, `api_key` (or header `x-eay-key`) makes it run under that key's budget and limits. At most 8 run at once; the rest wait in `queued` |
-| `GET /gateway/admin/subagents/tree` | Runs nested by `parent_id` (`children` arrays). Runs whose parent is a client request are roots, so a lead's subagents appear side by side |
+| `GET /gateway/admin/subagents/tree` | Runs nested by `parent_id` (`children` arrays). A request that delegates is the root, with its workers underneath |
 | `GET /gateway/admin/subagents/:id` | Get subagent status and output. `?wait=60` long-polls up to that many seconds (max 300) until it finishes, so an orchestrator can join on a child |
-| `POST /gateway/admin/subagents/:id/cancel` | Stop a queued or running subagent (phase becomes `cancelled`) |
+| `POST /gateway/admin/subagents/:id/cancel` | Stop a queued or running subagent and every run it started (phase becomes `cancelled`) |
 | `GET /gateway/admin/approvals` | Tool calls waiting for a person: `id`, `run_id`, `agent`, `tool`, `arguments`, `expires_at` |
 | `POST /gateway/admin/approvals/:id` | `{"approve": true}` or `false`. `404` if already answered or expired |
 | `DELETE /gateway/admin/subagents/:id` | Cancel it if still running and remove it from history |
@@ -230,10 +234,22 @@ With `max_subagents` set, the model gets an `eay_delegate` tool (`role`, `task`,
 `agent`). Calling it starts a subagent, waits for it (up to 10 minutes) and returns its answer as the
 tool result.
 
-- **Teams:** the tool lists your saved agents (name and description). With `agent: "tester"` the
-  subagent runs as `agent/tester`, with that agent's model, skills, personality and tool policy.
+- **Rosters:** without `x-eay-team`, the tool lists your saved agents (name and description). With
+  a roster, it lists only that roster's other members, and a call that names anyone else is rejected.
+  With `agent: "tester"` the subagent runs as `agent/tester`, with that agent's model, skills,
+  personality and tool policy. A saved agent is offered `delegate` only when its own policy sets
+  `max_subagents` (a key can still cap it). It does not inherit the lead's budget. Its own subagents
+  are temporary workers, not extra members of the roster.
 - **Parallel:** every `eay_delegate` call in one model reply runs at the same time (still at most 8
-  subagents active on the gateway), and the results come back in the order the model asked.
+  subagents active on the gateway), and the results come back in the order the model asked, each
+  labelled with the worker's role and agent.
+- **The tree:** once a request delegates, that request is the root of
+  `GET /gateway/admin/subagents/tree` and its workers are `children`. Cancelling a run stops every
+  run under it. If the client disconnects, the workers it was waiting on are stopped too.
+- **Team thread:** the lead and every worker it started share one thread through the `eay_say` tool
+  (post a note, or omit `message` to read). A worker sees the thread so far when it starts, including
+  what its siblings were asked to do. A different request cannot read it. The thread is dropped when
+  the lead run finishes.
 
 Subagents:
 

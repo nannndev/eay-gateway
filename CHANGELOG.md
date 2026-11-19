@@ -7,6 +7,14 @@ All notable changes to `eay-gateway` are documented in this file.
 ### Added
 - **Agent teams:** a model with a subagent budget can hand work to your saved agents
   (`eay_delegate` lists them and takes `agent`), and all delegations in one reply run in parallel.
+  The request shows up as the root of the run tree. Cancelling a run stops the runs under it, and
+  a saved agent delegates only when its own policy allows it. The lead and its workers share a
+  team thread (`eay_say`). An agent can list the MCP servers it uses on a loopback request.
+- **Rosters:** `POST /gateway/admin/teams` saves a list of agents under a stable id (`tm_…`).
+  `x-eay-team` limits who a request may delegate to. A session stores that id and keeps its own
+  transcript, so renaming the team or sharing it across two sessions does not mix the chats.
+- Cancelling a lead while its workers are running stops the request there. The model is not asked
+  for a wrap-up turn. A provider call that is already in flight still finishes.
 - `GET /gateway/admin/subagents/tree`: runs nested by parent, for team views.
 
 ## [0.3.1] - 2026-11-19

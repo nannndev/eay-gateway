@@ -147,6 +147,9 @@ pub struct AgentProfile {
     pub description: String,
     pub model: String,
     pub skills: Vec<String>,
+    /// MCP servers this agent uses when the request is allowed to run MCP (loopback, or a parent that was).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<String>,
     pub personality: String,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
@@ -154,6 +157,18 @@ pub struct AgentProfile {
     #[serde(default, skip_serializing_if = "crate::mcp::ToolPolicy::is_empty")]
     pub tool_policy: crate::mcp::ToolPolicy,
     pub enabled: bool,
+    pub updated_at: f64,
+}
+
+/// A roster the user assembled. Sessions remember which roster they use; the chat itself stays on the session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRecord {
+    /// Stable id (`tm_…`). Sessions store this. The name is only a label and may change.
+    pub id: String,
+    pub name: String,
+    /// The agent the user talks to. Always one of `members`.
+    pub lead: String,
+    pub members: Vec<String>,
     pub updated_at: f64,
 }
 

@@ -95,7 +95,18 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
         .map(str::trim)
         .filter(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .map(String::from);
-    ChatOptions { skills, session_id, max_context_chars, redact_secrets, mcp_servers, run_id, ..Default::default() }
+    let team = headers.get("x-eay-team").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    ChatOptions {
+        skills,
+        session_id,
+        team,
+        max_context_chars,
+        redact_secrets,
+        mcp_servers,
+        mcp_allowed: super::is_loopback_host(headers),
+        run_id,
+        ..Default::default()
+    }
 }
 
 /// A presented key must be a valid, enabled virtual key; no key means the local app (anonymous).
@@ -442,6 +453,9 @@ pub struct SaveAgentPayload {
     /// `{"mode":"read_only","allow":["fs/*"],"deny":["write_file"]}` for gateway-run MCP tools.
     #[serde(default)]
     tool_policy: eay_gateway_core::mcp::ToolPolicy,
+    /// MCP servers this agent uses on a loopback request (or a subagent of one). Example: `["filesystem"]`.
+    #[serde(default)]
+    mcp: Vec<String>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -458,7 +472,18 @@ pub async fn handle_save_agent(State(engine): State<GatewayEngine>, Json(p): Jso
     let name = p.name.as_deref().unwrap_or("");
     let agent = engine
         .store
-        .save_agent(name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, &p.tool_policy, p.enabled)
+        .save_agent(
+            name,
+            &p.description,
+            &p.model,
+            &p.skills,
+            &p.personality,
+            p.temperature,
+            p.max_tokens,
+            &p.tool_policy,
+            p.enabled,
+            &p.mcp,
+        )
         .map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "agent": agent })))
 }
@@ -470,13 +495,50 @@ pub async fn handle_put_agent(
 ) -> Result<Json<Value>, GatewayError> {
     let agent = engine
         .store
-        .save_agent(&name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, &p.tool_policy, p.enabled)
+        .save_agent(
+            &name,
+            &p.description,
+            &p.model,
+            &p.skills,
+            &p.personality,
+            p.temperature,
+            p.max_tokens,
+            &p.tool_policy,
+            p.enabled,
+            &p.mcp,
+        )
         .map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "agent": agent })))
 }
 
 pub async fn handle_delete_agent(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Json<Value> {
     let deleted = engine.store.delete_agent(&name).unwrap_or(false);
+    Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
+}
+
+#[derive(Deserialize)]
+pub struct SaveTeamPayload {
+    /// Set to update this team. Omit to create a new id.
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(default)]
+    lead: String,
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+pub async fn handle_list_teams(State(engine): State<GatewayEngine>) -> Json<Value> {
+    Json(json!({ "teams": engine.store.list_teams() }))
+}
+
+pub async fn handle_save_team(State(engine): State<GatewayEngine>, Json(p): Json<SaveTeamPayload>) -> Result<Json<Value>, GatewayError> {
+    let team =
+        engine.store.save_team(p.id.as_deref(), p.name.as_deref().unwrap_or(""), &p.lead, &p.members).map_err(GatewayError::BadRequest)?;
+    Ok(Json(json!({ "team": team })))
+}
+
+pub async fn handle_delete_team(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
+    let deleted = engine.store.delete_team(&id).unwrap_or(false);
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }
 
@@ -505,6 +567,7 @@ pub async fn handle_get_session(State(engine): State<GatewayEngine>, Path(id): P
         .collect();
     Ok(Json(json!({
         "id": storage, "session": name, "updated_at": updated_at,
+        "team": engine.store.session_team(&storage),
         "messages": engine.store.get_session_messages(&storage),
         "subagents": subagents,
     })))
@@ -595,7 +658,13 @@ pub async fn handle_spawn_subagent(
         },
         _ => None,
     };
-    let opts = ChatOptions { skills: p.skills, session_id: p.session_id, mcp_servers: p.mcp, ..Default::default() };
+    let opts = ChatOptions {
+        skills: p.skills,
+        session_id: p.session_id,
+        mcp_servers: p.mcp,
+        mcp_allowed: super::is_loopback_host(&headers),
+        ..Default::default()
+    };
     let run = engine.spawn_subagent(key, p.role, p.model, p.prompt, p.system, p.parent_id, opts);
     Ok(Json(json!({ "subagent": run })))
 }
@@ -645,14 +714,13 @@ pub async fn handle_cancel_subagent(State(engine): State<GatewayEngine>, Path(id
     if engine.activity.get_run(&id).is_none() {
         return Err(GatewayError::NotFound("Subagent not found".into()));
     }
-    let cancelled = engine.activity.cancel_run(&id);
-    if let Some(r) = engine.activity.get_run(&id).filter(|_| cancelled) {
-        engine.store.save_subagent_run(&r);
-    }
+    let cancelled = engine.cancel_subagent(&id);
     Ok(Json(json!({ "status": if cancelled { "cancelled" } else { "not_running" } })))
 }
 
 pub async fn handle_delete_subagent(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
+    // Stop the branch first, so deleting a lead does not leave its workers running.
+    let _ = engine.cancel_subagent(&id);
     let deleted = engine.activity.delete_run(&id);
     engine.store.delete_subagent_run(&id);
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))

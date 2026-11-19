@@ -11,6 +11,35 @@ fn account_enabled(store: &GatewayStore, id: &str) -> Option<bool> {
     store.list_accounts().into_iter().find(|a| a.id == id).map(|a| a.enabled)
 }
 
+mod teams {
+    use super::*;
+
+    #[test]
+    fn a_team_saved_under_its_name_keeps_that_name_and_sessions_follow_the_new_id() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("gateway.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE teams (
+                    name TEXT PRIMARY KEY, lead TEXT NOT NULL, members TEXT NOT NULL, updated_at REAL NOT NULL
+                );
+                INSERT INTO teams VALUES ('app', 'lead', '[\"lead\"]', 1);
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY, messages TEXT NOT NULL DEFAULT '[]', updated_at REAL NOT NULL, team TEXT
+                );
+                INSERT INTO sessions VALUES ('local:s1', '[]', 1, 'app');",
+            )
+            .unwrap();
+        }
+        let store = GatewayStore::new(dir.path()).unwrap();
+        let teams = store.list_teams();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].name, "app");
+        assert!(teams[0].id.starts_with("tm_"), "{}", teams[0].id);
+        assert_eq!(store.session_team("local:s1").as_deref(), Some(teams[0].id.as_str()));
+    }
+}
+
 mod accounts {
     use super::*;
 

@@ -20,8 +20,8 @@ The gateway sends each request to one of your connected accounts and automatical
 - **Agents, Skills & Session Memory:**
   - Reusable **Skills** (`+skill`, `x-eay-skills`, or upload `SKILL.md` in eay-console)
   - **Agent Profiles** (`agent/<name>`) combining model/combo, skills, personality, tuning and a tool policy
-  - **Session Memory** via `x-eay-session-id`, private per key, browsable through `GET /gateway/admin/sessions`
-- **Multi-agent:** subagents you start (cancel, wait, parent trees, history) or that the model starts itself with the `eay_delegate` tool; children never get more permission than their parent and stop at three levels
+  - **Session Memory** via `x-eay-session-id`, private per key, browsable through `GET /gateway/admin/sessions`. A session can remember a roster (`x-eay-team`); two sessions may share that roster and still keep separate chats
+- **Multi-agent:** subagents you start (cancel, wait, parent trees, history) or that the model starts itself with the `eay_delegate` tool, including several at once and saved agents (`agent/reviewer`). Cancelling a run stops the runs under it. Children never get more permission than their parent and stop at three levels
 - **Tool control for gateway-run tools:** per agent or key, `read_only` / allow / deny lists, and **manual approval** (`manual` or `manual_for_writes`) with Approve/Deny in eay-console. Coding apps keep their own permission modes
 - **Guardrails & Budgets:** Virtual keys (`gw-sk-…`) with per-key `allowed_providers`, `rate_limit_per_min`, `max_concurrent`, `max_tokens_budget`, `max_cost_usd`, private session memory, plus optional secret redaction (`x-eay-redact: true`) and context trimming (`x-eay-max-context-chars`)
 - **External MCP Connectors (`x-eay-mcp`):** Connect local `stdio` MCP servers (Filesystem, GitHub, Postgres) and Streamable HTTP remote MCP servers (Notion, Linear, Figma) with custom auth headers and automatic tool execution loops; local servers stay running between calls, and configs import straight from Claude Desktop, Claude Code, Cursor or VS Code

@@ -80,6 +80,8 @@ pub struct ActivityHub {
     pub slots: Arc<tokio::sync::Semaphore>,
     done: Arc<tokio::sync::Notify>,
     approvals: Arc<Mutex<HashMap<String, PendingSlot>>>,
+    /// Notes posted inside one run, keyed by the root run id. Shared by the lead and its workers only.
+    notes: Arc<Mutex<TeamLog>>,
 }
 
 pub const MAX_CONCURRENT_SUBAGENTS: usize = 8;
@@ -98,6 +100,9 @@ pub struct PendingApproval {
 }
 
 type PendingSlot = (PendingApproval, tokio::sync::oneshot::Sender<bool>);
+/// Who posted a line on a run's team thread, and the text.
+type TeamNote = (String, String);
+type TeamLog = HashMap<String, Vec<TeamNote>>;
 
 /// How long a tool call waits for approval before it counts as denied.
 pub const APPROVAL_TIMEOUT_SECS: u64 = 300;
@@ -113,6 +118,7 @@ impl Default for ActivityHub {
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBAGENTS)),
             done: Default::default(),
             approvals: Default::default(),
+            notes: Default::default(),
         }
     }
 }
@@ -297,21 +303,105 @@ impl ActivityHub {
         self.tasks.lock().insert(id.to_string(), handle);
     }
 
-    /// Stops a running subagent's task. Returns false if it was not running.
+    /// Stops this run and every run it started. Returns the ids that were still going.
+    /// Leaves go first, so aborting a parent cannot leave its children running.
+    pub fn cancel_tree(&self, id: &str) -> Vec<String> {
+        let ids = {
+            let runs = self.runs.lock();
+            let mut want = vec![id.to_string()];
+            let mut i = 0;
+            while i < want.len() && want.len() < 64 {
+                let parent = want[i].clone();
+                for r in runs.values() {
+                    if r.parent_id.as_deref() == Some(parent.as_str()) && !want.iter().any(|w| w == &r.id) {
+                        want.push(r.id.clone());
+                    }
+                }
+                i += 1;
+            }
+            want
+        };
+        let mut stopped = Vec::new();
+        for id in ids.into_iter().rev() {
+            if self.cancel_one(&id) {
+                stopped.push(id);
+            }
+        }
+        stopped
+    }
+
+    /// Stops a running subagent and the runs under it. Returns false if none were running.
     pub fn cancel_run(&self, id: &str) -> bool {
+        !self.cancel_tree(id).is_empty()
+    }
+
+    fn cancel_one(&self, id: &str) -> bool {
         let Some(h) = self.tasks.lock().remove(id) else { return false };
         h.abort();
-        let role = {
-            let mut runs = self.runs.lock();
-            let Some(run) = runs.get_mut(id) else { return true };
-            run.phase = "cancelled".into();
-            run.status_message = "Cancelled".into();
-            run.updated_at = now();
-            run.role.clone()
-        };
+        let Some(role) = self.mark_cancelled_inner(id) else { return true };
         self.emit_phase(id, None, Some(&role), "cancelled", "Cancelled", None, None);
         self.done.notify_waiters();
         true
+    }
+
+    /// Marks a run cancelled even when it has no task of its own (a client request that delegated).
+    /// Returns it only when this call changed the phase.
+    pub fn mark_cancelled(&self, id: &str) -> Option<SubagentRun> {
+        let role = self.mark_cancelled_inner(id)?;
+        let run = self.get_run(id)?;
+        if run.parent_id.is_none() {
+            self.notes.lock().remove(&run.id);
+        }
+        self.emit_phase(id, None, Some(&role), "cancelled", "Cancelled", None, None);
+        self.done.notify_waiters();
+        Some(run)
+    }
+
+    fn mark_cancelled_inner(&self, id: &str) -> Option<String> {
+        let mut runs = self.runs.lock();
+        let run = runs.get_mut(id)?;
+        if run.is_finished() {
+            return None;
+        }
+        run.phase = "cancelled".into();
+        run.status_message = "Cancelled".into();
+        run.updated_at = now();
+        Some(run.role.clone())
+    }
+
+    /// The root of this run: the client request, or this id when nothing started it.
+    pub fn team_root(&self, id: &str) -> String {
+        let runs = self.runs.lock();
+        let mut current = id.to_string();
+        for _ in 0..8 {
+            match runs.get(&current).and_then(|r| r.parent_id.clone()) {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        current
+    }
+
+    /// Posts a note on a run's thread and returns the thread. An empty message only reads.
+    /// Other runs cannot see it. The thread is dropped when the root run finishes.
+    pub fn team_post(&self, root: &str, from: &str, message: &str) -> String {
+        const MAX_NOTES: usize = 40;
+        const MAX_CHARS: usize = 500;
+        let text: String = message.trim().chars().take(MAX_CHARS).collect();
+        let mut notes = self.notes.lock();
+        let log = notes.entry(root.to_string()).or_default();
+        if !text.is_empty() {
+            log.push((from.trim().to_string(), text));
+            if log.len() > MAX_NOTES {
+                let drop_n = log.len() - MAX_NOTES;
+                log.drain(0..drop_n);
+            }
+        }
+        if log.is_empty() {
+            "(no notes yet)".into()
+        } else {
+            log.iter().map(|(who, text)| format!("[{who}] {text}")).collect::<Vec<_>>().join("\n")
+        }
     }
 
     /// Waits until the run finishes or `timeout` passes; returns its latest state.
@@ -331,25 +421,30 @@ impl ActivityHub {
 
     pub fn finish_run(&self, id: &str, output: Option<String>, error: Option<String>) -> Option<SubagentRun> {
         self.tasks.lock().remove(id);
-        let finished = self.finish_inner(id, output, error);
+        let finished = self.finish_inner(id, output, error)?;
+        if finished.parent_id.is_none() {
+            self.notes.lock().remove(&finished.id);
+        }
         self.done.notify_waiters();
-        finished
+        Some(finished)
     }
 
     fn finish_inner(&self, id: &str, output: Option<String>, error: Option<String>) -> Option<SubagentRun> {
         let mut runs = self.runs.lock();
         let run = runs.get_mut(id)?;
-        {
-            run.updated_at = now();
-            if let Some(err) = error {
-                run.phase = "failed".into();
-                run.status_message = err.clone();
-                run.error = Some(err);
-            } else {
-                run.phase = "completed".into();
-                run.status_message = "Completed".into();
-                run.output = output;
-            }
+        // Cancel wins. A task that finishes after it was stopped must not flip the run back.
+        if run.is_finished() {
+            return None;
+        }
+        run.updated_at = now();
+        if let Some(err) = error {
+            run.phase = "failed".into();
+            run.status_message = err.clone();
+            run.error = Some(err);
+        } else {
+            run.phase = "completed".into();
+            run.status_message = "Completed".into();
+            run.output = output;
         }
         Some(run.clone())
     }

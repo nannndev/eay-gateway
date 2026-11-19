@@ -5,7 +5,12 @@ All notable changes to **eay-gateway** are listed below.
 ## Unreleased
 
 - **Agent teams:** a lead agent hands work to your saved agents (reviewer, tester, …), several at
-  once, and eay-console shows the team as a live tree.
+  once. The lead is the root of the run tree. Cancelling it stops the workers under it. A saved
+  agent delegates only when its own policy sets a subagent budget. The lead and its workers share
+  one team thread. An agent can list the MCP servers it uses from this machine. A roster
+  (`x-eay-team`, id `tm_…`) limits which agents that thread may call. Sessions store the team id
+  and keep separate chats, so a rename does not drop them. Cancelling the lead skips its wrap-up
+  turn.
 
 ## v0.3.1 — 2026-11-19
 

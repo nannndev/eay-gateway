@@ -8,7 +8,7 @@ mod usage;
 mod tests;
 
 pub use models::{
-    AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProviderRecord, SkillRecord, UsageEntry, VirtualKeyRecord,
+    AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProviderRecord, SkillRecord, TeamRecord, UsageEntry, VirtualKeyRecord,
 };
 
 use crate::cipher::Cipher;
@@ -125,7 +125,11 @@ impl GatewayStore {
             );
             CREATE TABLE IF NOT EXISTS sessions (
               id TEXT PRIMARY KEY, messages TEXT NOT NULL DEFAULT '[]',
-              updated_at REAL NOT NULL
+              updated_at REAL NOT NULL, team TEXT
+            );
+            CREATE TABLE IF NOT EXISTS teams (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, lead TEXT NOT NULL,
+              members TEXT NOT NULL DEFAULT '[]', updated_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS mcp_servers (
               name TEXT PRIMARY KEY, transport TEXT NOT NULL DEFAULT 'stdio',
@@ -143,11 +147,53 @@ impl GatewayStore {
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN max_concurrent INTEGER", []);
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN tool_policy TEXT", []);
         let _ = conn.execute("ALTER TABLE agents ADD COLUMN tool_policy TEXT", []);
+        let _ = conn.execute("ALTER TABLE agents ADD COLUMN mcp TEXT NOT NULL DEFAULT '[]'", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN team TEXT", []);
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN headers TEXT NOT NULL DEFAULT '{}'", []);
         let _ = conn.execute("ALTER TABLE providers ADD COLUMN synced_models TEXT", []);
         let _ = conn.execute("ALTER TABLE providers ADD COLUMN models_synced_at REAL", []);
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN cached_tokens INTEGER", []);
         let _ = conn.execute("ALTER TABLE usage ADD COLUMN cost REAL", []);
+        migrate_named_teams(&conn)?;
         Ok(())
     }
+}
+
+/// The first draft of `teams` used the name as its primary key. Give each row an id and point
+/// sessions at that id, so renaming a team does not drop its chats.
+fn migrate_named_teams(conn: &Connection) -> Result<(), String> {
+    let has_id = conn
+        .prepare("PRAGMA table_info(teams)")
+        .and_then(|mut stmt| {
+            let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            Ok(cols.filter_map(Result::ok).any(|c| c == "id"))
+        })
+        .unwrap_or(false);
+    if has_id {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE teams_v2 (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, lead TEXT NOT NULL,
+            members TEXT NOT NULL DEFAULT '[]', updated_at REAL NOT NULL
+        );",
+    )
+    .map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT name, lead, members, updated_at FROM teams").map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String, f64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    for (name, lead, members, updated_at) in rows {
+        let id = format!("tm_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        conn.execute(
+            "INSERT INTO teams_v2 (id, name, lead, members, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, name, lead, members, updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        let _ = conn.execute("UPDATE sessions SET team = ?1 WHERE team = ?2", rusqlite::params![id, name]);
+    }
+    conn.execute_batch("DROP TABLE teams; ALTER TABLE teams_v2 RENAME TO teams;").map_err(|e| e.to_string())?;
+    Ok(())
 }

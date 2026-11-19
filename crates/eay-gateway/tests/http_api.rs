@@ -474,19 +474,61 @@ mod agents_and_sessions {
                 "model": "auto/coding",
                 "skills": ["rust-expert"],
                 "personality": "Speak concisely.",
-                "temperature": 0.2
+                "temperature": 0.2,
+                "mcp": ["filesystem"]
             })),
             None,
         )
         .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(created["agent"]["name"], "senior-rust");
+        assert_eq!(created["agent"]["mcp"], json!(["filesystem"]));
 
         let (_, models) = call(&app, "GET", "/v1/models", None, None).await;
         let ids: Vec<&str> = models["data"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
         assert!(ids.contains(&"agent/senior-rust"), "{ids:?}");
 
         let (st, del) = call(&app, "DELETE", "/gateway/admin/agents/senior-rust", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(del["status"], "deleted");
+    }
+
+    #[tokio::test]
+    async fn a_team_is_a_named_roster_of_agents() {
+        let (app, _d) = app();
+        for name in ["lead", "frontend"] {
+            let (st, _) = call(&app, "POST", "/gateway/admin/agents", Some(json!({ "name": name, "model": "auto" })), None).await;
+            assert_eq!(st, StatusCode::OK);
+        }
+        let (st, _) = call(&app, "POST", "/gateway/admin/teams", Some(json!({ "name": "app", "members": ["missing"] })), None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, created) = call(
+            &app,
+            "POST",
+            "/gateway/admin/teams",
+            Some(json!({ "name": "app", "lead": "lead", "members": ["lead", "frontend"] })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let id = created["team"]["id"].as_str().unwrap();
+        assert!(id.starts_with("tm_"), "{id}");
+        assert_eq!(created["team"]["lead"], "lead");
+        assert_eq!(created["team"]["members"], json!(["lead", "frontend"]));
+        let (st, renamed) = call(
+            &app,
+            "POST",
+            "/gateway/admin/teams",
+            Some(json!({ "id": id, "name": "app-2", "lead": "lead", "members": ["lead", "frontend"] })),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(renamed["team"]["id"], id);
+        assert_eq!(renamed["team"]["name"], "app-2");
+        let (_, listed) = call(&app, "GET", "/gateway/admin/teams", None, None).await;
+        assert_eq!(listed["teams"][0]["id"], id);
+        let (st, del) = call(&app, "DELETE", &format!("/gateway/admin/teams/{id}"), None, None).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(del["status"], "deleted");
     }

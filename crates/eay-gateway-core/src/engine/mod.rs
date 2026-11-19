@@ -15,6 +15,9 @@ pub struct ChatOptions {
     pub max_context_chars: usize,
     pub redact_secrets: bool,
     pub mcp_servers: Vec<String>,
+    /// The caller may start local MCP servers (a loopback request, or a parent run that could).
+    /// An agent's own MCP list is ignored when this is false, so a remote key cannot start a process.
+    pub mcp_allowed: bool,
     pub run_id: Option<String>,
     pub agent_label: Option<String>,
     /// Policy inherited from the agent that started this run (a subagent may never get more
@@ -22,6 +25,11 @@ pub struct ChatOptions {
     pub inherited_policy: Option<crate::mcp::ToolPolicy>,
     /// How many levels of `delegate` led to this run (0 = a request from a client).
     pub depth: u32,
+    /// Saved roster from `x-eay-team`. Loaded once on the client request.
+    pub team: Option<String>,
+    /// Member names once the roster is loaded. `None` means no roster, so every saved agent is offered.
+    /// A child run carries this so it cannot delegate outside the roster.
+    pub team_members: Option<Vec<String>>,
 }
 
 /// How long a `delegate` call waits for its subagent.
@@ -53,8 +61,135 @@ fn combine_policies(policies: &[&crate::mcp::ToolPolicy]) -> crate::mcp::ToolPol
     crate::mcp::ToolPolicy { mode, allow, deny, approval, max_subagents }
 }
 
+/// Request servers first, then the agent's own list when local MCP is allowed. Duplicates are dropped.
+fn merge_mcp(request: &[String], agent: &[String], allowed: bool) -> Vec<String> {
+    let mut out = request.to_vec();
+    if !allowed {
+        return out;
+    }
+    for name in agent {
+        let name = name.trim();
+        if !name.is_empty() && !out.iter().any(|s| s == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max).collect::<String>())
+    }
+}
+
+/// How many subagents this run may start. A saved agent delegates only when its own policy (or the
+/// key) turns it on, and never above the parent. A generic helper with no policy of its own inherits
+/// the parent's budget, so a lead can ask one worker to split the work further. Depth still caps the chain.
+fn delegation_limit(
+    depth: u32,
+    agent: &crate::mcp::ToolPolicy,
+    key: &crate::mcp::ToolPolicy,
+    inherited: Option<&crate::mcp::ToolPolicy>,
+    saved_agent: bool,
+) -> u32 {
+    if depth >= MAX_DELEGATE_DEPTH {
+        return 0;
+    }
+    let own = crate::mcp::subagent_budget(&[agent, key]);
+    let explicit = saved_agent || agent.max_subagents.is_some() || key.max_subagents.is_some();
+    match inherited.and_then(|p| p.max_subagents) {
+        Some(parent) if explicit => own.min(parent),
+        Some(parent) => parent,
+        None => own,
+    }
+}
+
+/// Text of an OpenAI chat completion. Content may be a string or a list of parts.
+fn message_text(reply: &Value) -> String {
+    let content = &reply["choices"][0]["message"]["content"];
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    content
+        .as_array()
+        .map(|parts| parts.iter().filter_map(|p| p["text"].as_str().or_else(|| p.as_str())).collect::<Vec<_>>().join(""))
+        .unwrap_or_default()
+}
+
+/// Saved agents the speaker may hand work to. With a roster, only its other members.
+fn roster_agents(agents: &[(String, String)], current: &str, members: Option<&[String]>) -> Vec<(String, String)> {
+    agents.iter().filter(|(name, _)| name != current && members.is_none_or(|ms| ms.iter().any(|m| m == name))).cloned().collect()
+}
+
+fn delegate_report(role: &str, agent: Option<&str>, body: &str) -> String {
+    match agent.filter(|a| !a.is_empty()) {
+        Some(a) => format!("[{role} · {a}]\n{body}"),
+        None => format!("[{role}]\n{body}"),
+    }
+}
+
+/// The client request, once it has delegated, so the run tree has a root to hang the team on.
+/// Dropped without `settle` (the client left, or the request failed) cancels the team.
+struct TeamRoot {
+    engine: GatewayEngine,
+    id: String,
+    active: bool,
+    settled: bool,
+}
+
+impl TeamRoot {
+    fn settle_json(&mut self, reply: &Value) {
+        if !self.active || self.settled {
+            return;
+        }
+        self.settled = true;
+        if let Some(r) = self.engine.activity.finish_run(&self.id, Some(message_text(reply)), None) {
+            self.engine.store.save_subagent_run(&r);
+        }
+    }
+
+    fn settle_chat(&mut self, reply: &ChatReply) {
+        match reply {
+            ChatReply::Json(v) => self.settle_json(v),
+            ChatReply::Stream(_) if self.active && !self.settled => {
+                self.settled = true;
+                if let Some(r) = self.engine.activity.finish_run(&self.id, None, None) {
+                    self.engine.store.save_subagent_run(&r);
+                }
+            }
+            ChatReply::Stream(_) => {}
+        }
+    }
+}
+
+impl Drop for TeamRoot {
+    fn drop(&mut self) {
+        if !self.active || self.settled {
+            return;
+        }
+        self.engine.cancel_subagent(&self.id);
+    }
+}
+
+/// Cancels the subagent (and everything it started) if this is dropped while the run is still going.
+/// That covers a client disconnect and a delegate wait that gives up.
+struct StopOnDrop {
+    engine: GatewayEngine,
+    id: String,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.engine.cancel_subagent(&self.id);
+    }
+}
+
 /// Name of the gateway-provided tool that lets a model start subagents.
 pub const DELEGATE_TOOL: &str = "eay_delegate";
+/// Team thread for the lead and the workers it started. Other runs cannot see it.
+pub const SAY_TOOL: &str = "eay_say";
 /// Deepest chain of subagents a model may build with `delegate`.
 pub const MAX_DELEGATE_DEPTH: u32 = 3;
 
@@ -62,7 +197,7 @@ pub const MAX_DELEGATE_DEPTH: u32 = 3;
 /// (name, description); they are listed so the model knows which specialists exist.
 fn delegate_tool_schema(agents: &[(String, String)]) -> Value {
     let mut description = String::from(
-        "Hand an independent subtask to a subagent and get its final answer back. Use it for work that can be done separately (research one topic, review one file). Call it several times in one reply to run subtasks at the same time. Give the subagent everything it needs in `task`; it cannot see this conversation.",
+        "Hand an independent subtask to a subagent and get its final answer back. Use it for work that can be done separately (research one topic, review one file). Call it several times in one reply to run subtasks at the same time. Give the subagent everything it needs in `task`; it cannot see this conversation, but it shares this run's team thread (eay_say) with you and the other workers.",
     );
     let mut props = json!({
         "role": { "type": "string", "description": "Short role, e.g. 'Test writer'" },
@@ -85,6 +220,22 @@ fn delegate_tool_schema(agents: &[(String, String)]) -> Value {
             "name": DELEGATE_TOOL,
             "description": description,
             "parameters": { "type": "object", "properties": props, "required": ["role", "task"] }
+        }
+    })
+}
+
+fn say_tool_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": SAY_TOOL,
+            "description": "Read this run's team thread, and optionally post a note the lead and the other workers in this run can see. Agents that are not part of this run cannot see it. Omit message to only read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string", "description": "Note to post. Leave out to only read the thread." }
+                }
+            }
         }
     })
 }
@@ -465,6 +616,47 @@ impl GatewayEngine {
         Err(gateway_err(502, format!("No connected AI provider could respond: {last_error}")))
     }
 
+    /// Members of the roster for this request. `None` means every saved agent may be delegated to.
+    /// A header binds the session; later requests on that session reuse it. Two sessions may name
+    /// the same roster and still keep separate transcripts.
+    fn resolve_team(&self, opts: &ChatOptions, session_storage: Option<&str>) -> Result<Option<Vec<String>>, ChatError> {
+        if let Some(members) = &opts.team_members {
+            return Ok(Some(members.clone()));
+        }
+        let named = match &opts.team {
+            Some(raw) => {
+                let name = raw.trim();
+                if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                    return Err(gateway_err(400, "Team id or name must use only letters, digits, '-' or '_'".into()));
+                }
+                Some(name.to_string())
+            }
+            None => session_storage.and_then(|id| self.store.session_team(id)),
+        };
+        let Some(token) = named else { return Ok(None) };
+        let team = self.lookup_team(&token)?;
+        // Store the id, even when the request named the team by its label.
+        if opts.team.is_some() {
+            if let Some(id) = session_storage {
+                self.store.set_session_team(id, &team.id).map_err(|e| gateway_err(400, e))?;
+            }
+        }
+        Ok(Some(team.members))
+    }
+
+    /// `token` is a team id, or a name when exactly one team uses it.
+    fn lookup_team(&self, token: &str) -> Result<crate::store::TeamRecord, ChatError> {
+        if let Some(team) = self.store.get_team(token) {
+            return Ok(team);
+        }
+        let same: Vec<_> = self.store.list_teams().into_iter().filter(|t| t.name == token).collect();
+        match same.as_slice() {
+            [team] => Ok(team.clone()),
+            [] => Err(gateway_err(404, format!("Team '{token}' not found"))),
+            _ => Err(gateway_err(400, format!("More than one team is named '{token}'. Send the team id."))),
+        }
+    }
+
     /// Routes one OpenAI-style chat request across the resolved targets, failing over on errors.
     /// `key` is the caller's virtual key, if it presented one.
     pub async fn chat_completions(&self, key: Option<VirtualKeyRecord>, body: Value) -> Result<ChatReply, ChatError> {
@@ -502,6 +694,7 @@ impl GatewayEngine {
         // The agent profile this request runs as, with or without a personality.
         let mut running_agent: Option<String> = None;
         let mut agent_tool_policy = crate::mcp::ToolPolicy::default();
+        let mut agent_mcp: Vec<String> = Vec::new();
 
         if let Some(agent_name) = base_model.strip_prefix("agent/") {
             let agent = self
@@ -512,6 +705,7 @@ impl GatewayEngine {
             base_model = agent.model.clone();
             running_agent = Some(agent.name.clone());
             combined_skills.extend(agent.skills);
+            agent_mcp = agent.mcp;
             agent_tool_policy = agent.tool_policy.clone();
             if !agent.personality.is_empty() {
                 agent_personality = Some((agent.name, agent.personality));
@@ -543,6 +737,12 @@ impl GatewayEngine {
 
         // Sessions are namespaced by caller so one key cannot read or extend another key's memory.
         let session_key = opts.session_id.as_deref().map(|sid| session_storage_id(key.as_ref(), sid));
+        let team_members = self.resolve_team(&opts, session_key.as_deref())?;
+        if let (Some(name), Some(members)) = (running_agent.as_deref(), team_members.as_ref()) {
+            if !members.iter().any(|m| m == name) {
+                return Err(gateway_err(400, format!("Agent '{name}' is not on this team")));
+            }
+        }
         if let Some(ref sid) = session_key {
             let history = self.store.get_session_messages(sid);
             if !history.is_empty() {
@@ -574,7 +774,9 @@ impl GatewayEngine {
         }
 
         let run_id = opts.run_id.clone().unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4().simple()));
-        let parent_id = opts.session_id.clone();
+        // A subagent's events point at the run that started it. A client request points at its session.
+        let parent_id = self.activity.get_run(&run_id).and_then(|r| r.parent_id).or_else(|| opts.session_id.clone());
+        let mut team = TeamRoot { engine: self.clone(), id: run_id.clone(), active: false, settled: false };
         self.activity.emit_phase(
             &run_id,
             parent_id.as_deref(),
@@ -588,38 +790,30 @@ impl GatewayEngine {
         let req_model = base_model;
         let caller_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
-        let mcp_records = self.resolve_mcp_servers(&opts.mcp_servers);
+        let mcp_servers = merge_mcp(&opts.mcp_servers, &agent_mcp, opts.mcp_allowed);
+        let mcp_records = self.resolve_mcp_servers(&mcp_servers);
         // The agent's, the key's and the parent run's tool policies all apply; the strictest wins.
         let key_policy = key.as_ref().map(|k| k.tool_policy.clone()).unwrap_or_default();
         let inherited = opts.inherited_policy.clone().unwrap_or_default();
         let policies = [&agent_tool_policy, &key_policy, &inherited];
         // `delegate` is offered only when some policy turns it on, never past the depth limit, and a
         // subagent never gets a bigger budget than its parent had.
-        let delegate_budget = if opts.depth >= MAX_DELEGATE_DEPTH {
-            0
-        } else {
-            let own = crate::mcp::subagent_budget(&[&agent_tool_policy, &key_policy]);
-            match opts.inherited_policy.as_ref().and_then(|p| p.max_subagents) {
-                // A subagent's own agent/key may lower the budget, never raise it.
-                Some(parent) if own > 0 => own.min(parent),
-                Some(parent) => parent,
-                None => own,
-            }
-        };
-        if !mcp_records.is_empty() || delegate_budget > 0 {
+        let delegate_budget =
+            delegation_limit(opts.depth, &agent_tool_policy, &key_policy, opts.inherited_policy.as_ref(), running_agent.is_some());
+        // A worker can talk to its lead and siblings even when it is not allowed to delegate further.
+        let in_team = opts.depth > 0 || delegate_budget > 0;
+        if !mcp_records.is_empty() || in_team {
             let mut merged_tools = body.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default();
             let mut mcp_index = crate::mcp::McpToolIndex::default();
+            if in_team {
+                merged_tools.push(say_tool_schema());
+            }
             if delegate_budget > 0 {
                 // Offer saved agents other than the one running now (an agent can still delegate to itself by model).
                 let current = running_agent.clone().unwrap_or_default();
-                let agents: Vec<(String, String)> = self
-                    .store
-                    .list_agents()
-                    .into_iter()
-                    .filter(|a| a.enabled && a.name != current)
-                    .take(30)
-                    .map(|a| (a.name, a.description))
-                    .collect();
+                let all: Vec<(String, String)> =
+                    self.store.list_agents().into_iter().filter(|a| a.enabled).map(|a| (a.name, a.description)).collect();
+                let agents: Vec<(String, String)> = roster_agents(&all, &current, team_members.as_deref()).into_iter().take(30).collect();
                 merged_tools.push(delegate_tool_schema(&agents));
             }
             let mut delegated: u32 = 0;
@@ -659,10 +853,15 @@ impl GatewayEngine {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter(|tc| tc["function"]["name"].as_str().is_some_and(|n| n == DELEGATE_TOOL || mcp_index.resolve(n).is_some()))
+                        .filter(|tc| {
+                            tc["function"]["name"]
+                                .as_str()
+                                .is_some_and(|n| n == DELEGATE_TOOL || n == SAY_TOOL || mcp_index.resolve(n).is_some())
+                        })
                         .cloned()
                         .collect();
                     if mcp_calls.is_empty() {
+                        team.settle_json(&reply);
                         if let Some(ref sid) = session_key {
                             self.append_session_turn(sid, &incoming_turns, &reply);
                         }
@@ -683,6 +882,22 @@ impl GatewayEngine {
                             })
                             .collect();
                         let mut delegate_outputs: HashMap<String, String> = HashMap::new();
+                        let speaker = agent_label.clone().or_else(|| running_agent.clone()).unwrap_or_else(|| "agent".into());
+                        let team_root = self.activity.team_root(&run_id);
+                        // Notes go up before workers start, so a note in this same reply is already on the thread.
+                        for tc in &mcp_calls {
+                            if tc["function"]["name"] != SAY_TOOL {
+                                continue;
+                            }
+                            let call_id = tc["id"].as_str().unwrap_or("").to_string();
+                            let args: Value =
+                                serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
+                            let thread = match args["message"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                                Some(message) => self.activity.team_post(&team_root, &speaker, message),
+                                None => self.activity.team_post(&team_root, &speaker, ""),
+                            };
+                            delegate_outputs.insert(call_id, thread);
+                        }
                         let mut runs = Vec::new();
                         for (call_id, args) in &delegate_calls {
                             if delegated >= delegate_budget {
@@ -698,20 +913,40 @@ impl GatewayEngine {
                                 args,
                                 &req_model,
                                 &run_id,
-                                agent_label.as_deref(),
+                                running_agent.as_deref().or(agent_label.as_deref()),
                                 &child_policy,
                                 opts.depth,
-                                &opts.mcp_servers,
+                                &mcp_servers,
+                                opts.mcp_allowed,
+                                team_members.as_deref(),
                             );
                             runs.push(async move { (call_id.clone(), fut.await) });
                         }
+                        if !runs.is_empty() && self.activity.get_run(&run_id).is_none() {
+                            let role = running_agent.clone().or_else(|| agent_label.clone()).unwrap_or_else(|| "request".into());
+                            let model = running_agent.as_ref().map(|n| format!("agent/{n}")).unwrap_or_else(|| req_model.clone());
+                            self.activity.create_run_with(
+                                run_id.clone(),
+                                opts.session_id.clone(),
+                                role.clone(),
+                                model,
+                                None,
+                                key.as_ref().map(|k| k.id.clone()),
+                            );
+                            self.activity.emit_phase(&run_id, None, Some(&role), "generating", format!("Running {role}"), None, None);
+                            team.active = true;
+                        }
                         delegate_outputs.extend(futures::future::join_all(runs).await);
+                        // Cancelled while the workers ran: do not ask the model for a wrap-up turn.
+                        if self.activity.get_run(&run_id).is_some_and(|r| r.phase == "cancelled") {
+                            return Err(gateway_err(409, "This run was cancelled.".into()));
+                        }
                         for tc in mcp_calls {
                             let call_id = tc["id"].as_str().unwrap_or("");
                             let full_name = tc["function"]["name"].as_str().unwrap_or("");
                             let args: Value =
                                 serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
-                            if full_name == DELEGATE_TOOL {
+                            if full_name == DELEGATE_TOOL || full_name == SAY_TOOL {
                                 let output = delegate_outputs.remove(call_id).unwrap_or_default();
                                 msgs.push(json!({ "role": "tool", "tool_call_id": call_id, "content": output }));
                                 continue;
@@ -779,6 +1014,7 @@ impl GatewayEngine {
         let reply = self
             .execute_chat_turn(key.as_ref(), &body, &req_model, &run_id, parent_id.as_deref(), agent_label.as_deref(), media_req)
             .await?;
+        team.settle_chat(&reply);
         let Some(sid) = session_key else { return Ok(reply) };
         Ok(match reply {
             ChatReply::Json(reply_json) => {
@@ -1063,10 +1299,7 @@ impl GatewayEngine {
             let _permit = engine.activity.slots.clone().acquire_owned().await.ok();
             let result = engine.chat_completions_with_options(key, body, opts).await;
             let finished = match result {
-                Ok(ChatReply::Json(v)) => {
-                    let txt = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
-                    engine.activity.finish_run(&task_id, Some(txt), None)
-                }
+                Ok(ChatReply::Json(v)) => engine.activity.finish_run(&task_id, Some(message_text(&v)), None),
                 Ok(ChatReply::Stream(_)) => engine.activity.finish_run(&task_id, Some(String::new()), None),
                 Err(e) => {
                     let msg = e.body["error"]["message"].as_str().unwrap_or("Subagent failed").to_string();
@@ -1094,37 +1327,74 @@ impl GatewayEngine {
         child_policy: &crate::mcp::ToolPolicy,
         depth: u32,
         mcp_servers: &[String],
+        mcp_allowed: bool,
+        team_members: Option<&[String]>,
     ) -> String {
         let task = args["task"].as_str().unwrap_or("").trim();
         if task.is_empty() {
             return "delegate needs a non-empty `task`.".into();
         }
         let role = args["role"].as_str().filter(|r| !r.trim().is_empty()).unwrap_or("Subagent").to_string();
+        let agent_name = args["agent"].as_str().map(str::trim).filter(|a| !a.is_empty()).map(str::to_string);
+        if let Some(agent) = agent_name.as_deref() {
+            if let Some(members) = team_members {
+                if !members.iter().any(|m| m == agent) {
+                    return delegate_report(&role, Some(agent), &format!("Agent '{agent}' is not on this team."));
+                }
+            }
+        }
         // A saved agent brings its own model, skills, personality and tool policy; its policy still
         // applies on top of the parent's, so it can never get more than the parent had.
-        let model = match args["agent"].as_str().map(str::trim).filter(|a| !a.is_empty()) {
+        let model = match agent_name.as_deref() {
             Some(agent) => match self.store.get_agent(agent).filter(|a| a.enabled) {
                 Some(_) => format!("agent/{agent}"),
-                None => return format!("No enabled agent named '{agent}'."),
+                None => return delegate_report(&role, agent_name.as_deref(), &format!("No enabled agent named '{agent}'.")),
             },
             None => args["model"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or(default_model).to_string(),
         };
         let opts = ChatOptions {
             mcp_servers: mcp_servers.to_vec(),
+            mcp_allowed,
             inherited_policy: Some(child_policy.clone()),
             depth: depth + 1,
+            team_members: team_members.map(|m| m.to_vec()),
             ..Default::default()
         };
-        let system = parent_agent.map(|a| format!("You are a subagent started by {a}. Finish the task and reply with the result only."));
+        let root = self.activity.team_root(parent_run);
+        let thread = self.activity.team_post(&root, &role, &format!("started: {}", clip_chars(task, 300)));
+        let parent = parent_agent.unwrap_or("the lead");
+        let system = Some(format!(
+            "You are a subagent started by {parent}. You share a team thread with the lead and the other workers in this run. Nobody outside this run can read it.\n\nTeam thread:\n{thread}\n\nPost a finding with eay_say, then reply with your result."
+        ));
         let run = self.spawn_subagent(key, role.clone(), model, task.to_string(), system, Some(parent_run.to_string()), opts);
-        match self.activity.wait_run(&run.id, std::time::Duration::from_secs(DELEGATE_WAIT_SECS)).await {
-            Some(r) if r.phase == "completed" => r.output.unwrap_or_default(),
-            Some(r) if r.is_finished() => format!("Subagent '{role}' {}: {}", r.phase, r.error.unwrap_or_default()),
-            _ => {
-                self.activity.cancel_run(&run.id);
-                format!("Subagent '{role}' did not finish within {DELEGATE_WAIT_SECS}s and was stopped.")
+        // Dropped while still waiting (client disconnect) stops this worker and anyone it started.
+        let stop = StopOnDrop { engine: self.clone(), id: run.id.clone() };
+        let waited = self.activity.wait_run(&run.id, std::time::Duration::from_secs(DELEGATE_WAIT_SECS)).await;
+        let body = match &waited {
+            Some(r) if r.phase == "completed" => r.output.clone().unwrap_or_default(),
+            Some(r) if r.is_finished() => format!("Subagent '{role}' {}: {}", r.phase, r.error.clone().unwrap_or_default()),
+            _ => format!("Subagent '{role}' did not finish within {DELEGATE_WAIT_SECS}s and was stopped."),
+        };
+        drop(stop);
+        let _ = self.activity.team_post(&root, &role, &format!("finished: {}", clip_chars(&body, 400)));
+        delegate_report(&role, agent_name.as_deref(), &body)
+    }
+
+    /// Stops a run and every run under it, and saves the ones that were still going.
+    pub fn cancel_subagent(&self, id: &str) -> bool {
+        let stopped = self.activity.cancel_tree(id);
+        let mut any = !stopped.is_empty();
+        for id in &stopped {
+            if let Some(r) = self.activity.get_run(id) {
+                self.store.save_subagent_run(&r);
             }
         }
+        // A client request that delegated has a tree root but no task. Mark that root too.
+        if let Some(r) = self.activity.mark_cancelled(id) {
+            self.store.save_subagent_run(&r);
+            any = true;
+        }
+        any
     }
 
     /// Loads saved subagent history into the live hub; call once at startup.
@@ -1302,6 +1572,20 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn cancelling_a_parent_stops_its_children() {
+            let (e, _d) = engine();
+            let _held = e.activity.slots.clone().acquire_many_owned(activity::MAX_CONCURRENT_SUBAGENTS as u32).await.unwrap();
+            let parent = e.spawn_subagent(None, "lead".into(), "auto".into(), "hi".into(), None, None, ChatOptions::default());
+            let child =
+                e.spawn_subagent(None, "worker".into(), "auto".into(), "hi".into(), None, Some(parent.id.clone()), ChatOptions::default());
+            assert!(e.cancel_subagent(&parent.id));
+            assert_eq!(e.activity.get_run(&parent.id).unwrap().phase, "cancelled");
+            assert_eq!(e.activity.get_run(&child.id).unwrap().phase, "cancelled");
+            let saved = e.store.list_subagent_runs(10);
+            assert!(saved.iter().any(|r| r.id == child.id && r.phase == "cancelled"));
+        }
+
+        #[tokio::test]
         async fn waiting_times_out_on_a_running_job() {
             let (e, _d) = engine();
             let _held = e.activity.slots.clone().acquire_many_owned(activity::MAX_CONCURRENT_SUBAGENTS as u32).await.unwrap();
@@ -1373,6 +1657,114 @@ mod tests {
         let gh = McpToolRef { server: "github".into(), tool: "x".into(), read_only: true };
         assert!(!key.permits(&gh) && !child.permits(&gh));
         assert_eq!(combine_policies(&[&ToolPolicy::default()]), ToolPolicy::default());
+    }
+
+    #[test]
+    fn a_saved_agent_does_not_inherit_a_budget_it_did_not_set() {
+        use crate::mcp::ToolPolicy;
+        let parent = ToolPolicy { max_subagents: Some(5), ..Default::default() };
+        let quiet = ToolPolicy::default();
+        let off = ToolPolicy { max_subagents: Some(0), ..Default::default() };
+        // A specialist with no budget stays quiet, even when the lead may delegate.
+        assert_eq!(delegation_limit(0, &quiet, &quiet, Some(&parent), true), 0);
+        assert_eq!(delegation_limit(0, &off, &quiet, Some(&parent), true), 0);
+        // It may lower the parent's budget, never raise it.
+        let capped = ToolPolicy { max_subagents: Some(2), ..Default::default() };
+        let greedy = ToolPolicy { max_subagents: Some(9), ..Default::default() };
+        assert_eq!(delegation_limit(0, &capped, &quiet, Some(&parent), true), 2);
+        assert_eq!(delegation_limit(0, &greedy, &quiet, Some(&parent), true), 5);
+        // A generic helper inherits, so one worker can split work further.
+        assert_eq!(delegation_limit(1, &quiet, &quiet, Some(&parent), false), 5);
+        // An explicit 0 on the key stops that too.
+        assert_eq!(delegation_limit(1, &quiet, &off, Some(&parent), false), 0);
+        assert_eq!(delegation_limit(MAX_DELEGATE_DEPTH, &capped, &quiet, Some(&parent), false), 0);
+        assert_eq!(delegation_limit(0, &parent, &quiet, None, true), 5);
+    }
+
+    #[test]
+    fn an_agents_mcp_list_is_kept_and_only_merged_when_local_mcp_is_allowed() {
+        use crate::mcp::ToolPolicy;
+        let (e, _d) = engine();
+        let saved = e
+            .store
+            .save_agent(
+                "tester",
+                "Writes tests",
+                "auto",
+                &[],
+                "",
+                None,
+                None,
+                &ToolPolicy::default(),
+                true,
+                &["filesystem".into(), "filesystem".into()],
+            )
+            .unwrap();
+        assert_eq!(saved.mcp, ["filesystem"]);
+        assert_eq!(e.store.get_agent("tester").unwrap().mcp, ["filesystem"]);
+        assert!(e.store.save_agent("bad", "", "auto", &[], "", None, None, &ToolPolicy::default(), true, &["no spaces".into()]).is_err());
+        assert_eq!(merge_mcp(&[], &["filesystem".into()], true), ["filesystem"]);
+        assert_eq!(merge_mcp(&["github".into()], &["filesystem".into()], true), ["github", "filesystem"]);
+        assert!(merge_mcp(&[], &["filesystem".into()], false).is_empty());
+    }
+
+    #[test]
+    fn a_team_thread_stays_inside_one_run() {
+        let (e, _d) = engine();
+        let hub = &e.activity;
+        hub.create_run_with("req_1".into(), None, "lead".into(), "auto".into(), None, None);
+        hub.create_run_with("sub_a".into(), None, "a".into(), "auto".into(), Some("req_1".into()), None);
+        hub.create_run_with("sub_b".into(), None, "b".into(), "auto".into(), Some("sub_a".into()), None);
+        assert_eq!(hub.team_root("sub_b"), "req_1");
+        assert_eq!(hub.team_post("req_1", "lead", ""), "(no notes yet)");
+        let thread = hub.team_post("req_1", "Worker a", "the bug is in auth.rs");
+        assert!(thread.contains("[Worker a] the bug is in auth.rs"), "{thread}");
+        assert_eq!(hub.team_post("req_other", "", ""), "(no notes yet)");
+    }
+
+    #[test]
+    fn message_text_reads_a_string_or_text_parts() {
+        assert_eq!(message_text(&json!({"choices":[{"message":{"content":"hi"}}]})), "hi");
+        let parts = json!({"choices":[{"message":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}}]});
+        assert_eq!(message_text(&parts), "ab");
+        assert_eq!(delegate_report("Worker a", None, "done"), "[Worker a]\ndone");
+        assert_eq!(delegate_report("Worker c", Some("tester"), "done"), "[Worker c · tester]\ndone");
+    }
+
+    #[test]
+    fn a_saved_team_is_a_roster_and_each_session_keeps_its_own_chat() {
+        use crate::mcp::ToolPolicy;
+        let (e, _d) = engine();
+        let quiet = ToolPolicy::default();
+        for name in ["lead", "frontend", "outsider"] {
+            e.store.save_agent(name, "", "auto", &[], "", None, None, &quiet, true, &[]).unwrap();
+        }
+        assert!(e.store.save_team(None, "app", "", &["nope".into()]).is_err());
+        let team = e.store.save_team(None, "app", "frontend", &["lead".into(), "frontend".into(), "lead".into()]).unwrap();
+        assert!(team.id.starts_with("tm_"), "{}", team.id);
+        assert_eq!(team.lead, "frontend");
+        assert_eq!(team.members, ["lead", "frontend"]);
+        let renamed = e.store.save_team(Some(&team.id), "renamed", "frontend", &team.members).unwrap();
+        assert_eq!(renamed.id, team.id);
+        let other = e.store.save_team(None, "renamed", "lead", &["lead".into()]).unwrap();
+        assert_ne!(other.id, team.id, "two teams may share a label");
+
+        e.store.set_session_team("local:s1", &team.id).unwrap();
+        e.store.set_session_team("local:s2", &team.id).unwrap();
+        e.store.save_session_messages("local:s1", &[json!({"role":"user","content":"one"})]).unwrap();
+        e.store.save_session_messages("local:s2", &[json!({"role":"user","content":"two"})]).unwrap();
+        assert_eq!(e.store.session_team("local:s1").as_deref(), Some(team.id.as_str()));
+        assert_eq!(e.store.session_team("local:s2").as_deref(), Some(team.id.as_str()));
+        assert_eq!(e.store.get_session_messages("local:s1")[0]["content"], "one");
+        assert_eq!(e.store.get_session_messages("local:s2")[0]["content"], "two");
+        assert!(e.store.delete_session("local:s1").unwrap());
+        assert_eq!(e.lookup_team(&team.id).unwrap().name, "renamed", "forgetting a session does not delete the roster");
+        assert!(e.lookup_team("renamed").is_err(), "a shared label is not an address");
+        assert!(e.store.session_team("local:s1").is_none());
+
+        let all = [("lead".into(), String::new()), ("frontend".into(), String::new()), ("outsider".into(), String::new())];
+        assert_eq!(roster_agents(&all, "lead", Some(&team.members)), vec![("frontend".into(), String::new())]);
+        assert_eq!(roster_agents(&all, "lead", None).len(), 2);
     }
 
     #[tokio::test]

@@ -245,6 +245,8 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/skills/:name/toggle", patch(admin::handle_toggle_skill))
         .route("/gateway/admin/agents", get(admin::handle_list_agents).post(admin::handle_save_agent))
         .route("/gateway/admin/agents/:name", put(admin::handle_put_agent).delete(admin::handle_delete_agent))
+        .route("/gateway/admin/teams", get(admin::handle_list_teams).post(admin::handle_save_team))
+        .route("/gateway/admin/teams/:id", delete(admin::handle_delete_team))
         .route("/gateway/admin/sessions", get(admin::handle_list_sessions))
         .route("/gateway/admin/sessions/:id", get(admin::handle_get_session).delete(admin::handle_delete_session))
         // Live Activity & Subagents

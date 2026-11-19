@@ -218,8 +218,34 @@ curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: appli
   -d '{"name":"tester","model":"auto","description":"Writes unit tests"}'
 ```
 
-eay-console's Activity tab shows the team as a tree: who handed work to whom, live status and each
-result. Add approval so a team cannot change anything without you:
+eay-console's Activity tab shows the run as a tree: the lead on top, then who it handed work to,
+with live status and each result. Cancelling the lead stops its workers. A specialist delegates
+further only if you set `max_subagents` on that agent too. Those extra workers are not members of
+a roster. Workers in that run can post and read a shared thread (`eay_say`); a different request
+cannot see it.
+
+To choose the agents yourself, save a roster and send its id with the session. The name is a label:
+renaming the team keeps the id, and the same id can back two sessions. Each session has its own
+messages. Forgetting a session does not delete the roster.
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/teams -H 'content-type: application/json' \
+  -d '{"name":"app","lead":"reviewer","members":["reviewer","tester"]}'
+# the response id looks like tm_ab12cd34ef56 — send that, not the label
+curl http://127.0.0.1:20129/v1/chat/completions -H 'content-type: application/json' \
+  -H 'x-eay-team: tm_ab12cd34ef56' -H 'x-eay-session-id: project-1' \
+  -d '{"model":"agent/reviewer","messages":[{"role":"user","content":"Build the project"}]}'
+```
+
+Give a specialist its tools with
+`mcp` (used when the request comes from this machine):
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' \
+  -d '{"name":"tester","model":"auto","description":"Writes unit tests","mcp":["filesystem"]}'
+```
+
+Add approval so a team cannot change anything without you:
 
 ```sh
 curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' -d '{
