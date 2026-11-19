@@ -28,24 +28,95 @@ pub fn encode_tool_name(server: &str, tool: &str) -> String {
     format!("{}_{hash}", head.chars().take(MAX_TOOL_NAME - 9).collect::<String>())
 }
 
+/// One MCP tool as the gateway knows it.
+#[derive(Debug, Clone)]
+pub struct McpToolRef {
+    pub server: String,
+    pub tool: String,
+    /// The server marked it `readOnlyHint` (it does not change anything).
+    pub read_only: bool,
+}
+
 /// Maps tool names as shown to the model back to `(server, tool)`, including shortened ones.
 #[derive(Debug, Default, Clone)]
-pub struct McpToolIndex(std::collections::HashMap<String, (String, String)>);
+pub struct McpToolIndex(std::collections::HashMap<String, McpToolRef>);
 
 impl McpToolIndex {
     pub fn insert(&mut self, server: &str, tool: &str) -> String {
+        self.insert_with(server, tool, false)
+    }
+
+    pub fn insert_with(&mut self, server: &str, tool: &str, read_only: bool) -> String {
         let name = encode_tool_name(server, tool);
-        self.0.insert(name.clone(), (server.to_string(), tool.to_string()));
+        self.0.insert(name.clone(), McpToolRef { server: server.to_string(), tool: tool.to_string(), read_only });
         name
     }
 
     pub fn resolve(&self, shown: &str) -> Option<(&str, &str)> {
-        self.0.get(shown).map(|(s, t)| (s.as_str(), t.as_str()))
+        self.0.get(shown).map(|r| (r.server.as_str(), r.tool.as_str()))
+    }
+
+    pub fn get(&self, shown: &str) -> Option<&McpToolRef> {
+        self.0.get(shown)
     }
 
     pub fn extend(&mut self, other: McpToolIndex) {
         self.0.extend(other.0);
     }
+}
+
+/// Which gateway-run MCP tools an agent or key may use. Client-side tools (Claude Code, Codex,
+/// Cursor) are never affected: their permission modes stay with the client.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolPolicy {
+    /// `read_only` keeps only tools the server marks `readOnlyHint`; `none` offers no MCP tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// If set, only these tools (`server/tool`, `server/*` or `tool`) are offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    /// These tools are never offered (same patterns as `allow`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+}
+
+impl ToolPolicy {
+    /// Checks a `mode` value from an API request.
+    pub fn validate(&self) -> Result<(), String> {
+        match self.mode.as_deref() {
+            None | Some("all" | "read_only" | "none") => Ok(()),
+            Some(other) => Err(format!("unknown tool mode '{other}'; use all, read_only or none")),
+        }
+    }
+
+    fn matches(pattern: &str, t: &McpToolRef) -> bool {
+        match pattern.split_once('/') {
+            Some((srv, "*")) => srv == t.server,
+            Some((srv, tool)) => srv == t.server && tool == t.tool,
+            None => pattern == t.tool,
+        }
+    }
+
+    pub fn permits(&self, t: &McpToolRef) -> bool {
+        let mode_ok = match self.mode.as_deref() {
+            Some("none") => false,
+            Some("read_only") => t.read_only,
+            _ => true,
+        };
+        mode_ok
+            && self.allow.as_ref().is_none_or(|a| a.iter().any(|p| Self::matches(p, t)))
+            && !self.deny.iter().any(|p| Self::matches(p, t))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// True only if every policy permits the tool, so combining an agent's and a key's policy keeps
+/// the stricter of the two.
+pub fn all_permit(policies: &[&ToolPolicy], t: &McpToolRef) -> bool {
+    policies.iter().all(|p| p.permits(t))
 }
 
 /// Splits `mcp__<server>__<tool>` back into `(server, tool)`.
@@ -360,10 +431,11 @@ pub async fn list_tools_indexed(http: &Client, server: &McpServerRecord) -> Resu
             let name = t["name"].as_str()?;
             let schema =
                 if t["inputSchema"].is_object() { t["inputSchema"].clone() } else { json!({ "type": "object", "properties": {} }) };
+            let read_only = t["annotations"]["readOnlyHint"].as_bool().unwrap_or(false);
             Some(json!({
                 "type": "function",
                 "function": {
-                    "name": index.insert(&server.name, name),
+                    "name": index.insert_with(&server.name, name, read_only),
                     "description": t["description"].as_str().unwrap_or(""),
                     "parameters": schema,
                 }
@@ -550,6 +622,33 @@ done"#,
         srv.updated_at += 1.0;
         assert_eq!(call_tool(&http, &srv, "t", json!({})).await.unwrap(), "call 2");
         assert_eq!(std::fs::read_to_string(dir.path().join("spawns")).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn tool_policies_filter_by_mode_allow_and_deny_and_combine_strictly() {
+        let read = McpToolRef { server: "fs".into(), tool: "read_file".into(), read_only: true };
+        let write = McpToolRef { server: "fs".into(), tool: "write_file".into(), read_only: false };
+        let gh = McpToolRef { server: "github".into(), tool: "create_issue".into(), read_only: false };
+
+        let open = ToolPolicy::default();
+        assert!(open.permits(&write) && open.is_empty());
+
+        let ro = ToolPolicy { mode: Some("read_only".into()), ..Default::default() };
+        assert!(ro.permits(&read) && !ro.permits(&write));
+
+        let none = ToolPolicy { mode: Some("none".into()), ..Default::default() };
+        assert!(!none.permits(&read));
+
+        let only_fs = ToolPolicy { allow: Some(vec!["fs/*".into()]), deny: vec!["write_file".into()], ..Default::default() };
+        assert!(only_fs.permits(&read) && !only_fs.permits(&write) && !only_fs.permits(&gh));
+        let exact = ToolPolicy { allow: Some(vec!["github/create_issue".into()]), ..Default::default() };
+        assert!(exact.permits(&gh) && !exact.permits(&read));
+
+        // Agent allows github, key is read-only: the stricter rule wins.
+        assert!(!all_permit(&[&exact, &ro], &gh));
+        assert!(all_permit(&[&open, &open], &write));
+
+        assert!(ToolPolicy { mode: Some("yolo".into()), ..Default::default() }.validate().is_err());
     }
 
     #[test]

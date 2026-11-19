@@ -141,6 +141,8 @@ impl GatewayStore {
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN max_tokens_budget INTEGER", []);
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN max_cost_usd REAL", []);
         let _ = conn.execute("ALTER TABLE keys ADD COLUMN max_concurrent INTEGER", []);
+        let _ = conn.execute("ALTER TABLE keys ADD COLUMN tool_policy TEXT", []);
+        let _ = conn.execute("ALTER TABLE agents ADD COLUMN tool_policy TEXT", []);
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN headers TEXT NOT NULL DEFAULT '{}'", []);
         let _ = conn.execute("ALTER TABLE providers ADD COLUMN synced_models TEXT", []);
         let _ = conn.execute("ALTER TABLE providers ADD COLUMN models_synced_at REAL", []);

@@ -429,6 +429,7 @@ impl GatewayEngine {
         let mut base_model = parsed_model.to_string();
         let mut combined_skills: Vec<String> = Vec::new();
         let mut agent_personality: Option<(String, String)> = None;
+        let mut agent_tool_policy = crate::mcp::ToolPolicy::default();
 
         if let Some(agent_name) = base_model.strip_prefix("agent/") {
             let agent = self
@@ -438,6 +439,7 @@ impl GatewayEngine {
                 .ok_or_else(|| gateway_err(404, format!("Agent profile '{agent_name}' not found or disabled")))?;
             base_model = agent.model.clone();
             combined_skills.extend(agent.skills);
+            agent_tool_policy = agent.tool_policy.clone();
             if !agent.personality.is_empty() {
                 agent_personality = Some((agent.name, agent.personality));
             }
@@ -517,9 +519,17 @@ impl GatewayEngine {
         if !mcp_records.is_empty() {
             let mut merged_tools = body.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default();
             let mut mcp_index = crate::mcp::McpToolIndex::default();
+            // The agent's and the key's tool policies both apply; the stricter one wins.
+            let key_policy = key.as_ref().map(|k| k.tool_policy.clone()).unwrap_or_default();
+            let policies = [&agent_tool_policy, &key_policy];
             for srv in &mcp_records {
                 let (tools, index) = self.mcp_tools_cached(srv).await;
-                merged_tools.extend(tools);
+                for t in tools {
+                    let shown = t["function"]["name"].as_str().unwrap_or("");
+                    if index.get(shown).is_some_and(|r| crate::mcp::all_permit(&policies, r)) {
+                        merged_tools.push(t);
+                    }
+                }
                 mcp_index.extend(index);
             }
             if !merged_tools.is_empty() {
@@ -564,7 +574,11 @@ impl GatewayEngine {
                             let full_name = tc["function"]["name"].as_str().unwrap_or("");
                             let args: Value =
                                 serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
-                            let output = if let Some((srv_name, tool_name)) = mcp_index.resolve(full_name) {
+                            // Re-check at run time: a model can name a tool it was never offered.
+                            let permitted = mcp_index.get(full_name).is_some_and(|r| crate::mcp::all_permit(&policies, r));
+                            let output = if !permitted {
+                                format!("Tool `{full_name}` is not allowed for this agent or key.")
+                            } else if let Some((srv_name, tool_name)) = mcp_index.resolve(full_name) {
                                 let (mut meta, msg_label) = build_tool_activity_meta(full_name, &args);
                                 let t_tool = std::time::Instant::now();
                                 let res = match mcp_records.iter().find(|s| s.name == srv_name) {

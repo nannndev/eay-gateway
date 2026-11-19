@@ -122,6 +122,9 @@ pub struct VirtualKeyRecord {
     /// Requests this key may have in flight at once (agents fanning out); None = unlimited.
     #[serde(default)]
     pub max_concurrent: Option<i64>,
+    /// Which gateway-run MCP tools requests with this key may use.
+    #[serde(default, skip_serializing_if = "crate::mcp::ToolPolicy::is_empty")]
+    pub tool_policy: crate::mcp::ToolPolicy,
     pub created_at: f64,
     pub last_used_at: Option<f64>,
     pub total_requests: i64,
@@ -147,6 +150,9 @@ pub struct AgentProfile {
     pub personality: String,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
+    /// Which gateway-run MCP tools this agent may use.
+    #[serde(default, skip_serializing_if = "crate::mcp::ToolPolicy::is_empty")]
+    pub tool_policy: crate::mcp::ToolPolicy,
     pub enabled: bool,
     pub updated_at: f64,
 }

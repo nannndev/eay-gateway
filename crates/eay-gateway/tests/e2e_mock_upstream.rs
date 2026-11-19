@@ -345,3 +345,83 @@ async fn claude_code_thinking_reaches_an_openai_upstream_as_reasoning_effort() {
     assert!(sent.get("thinking_budget_tokens").is_none(), "gateway-only field leaked upstream: {sent}");
     assert!(sent.get("thinking").is_none());
 }
+
+/// stdio MCP server with one read-only tool and one write tool.
+#[cfg(unix)]
+fn two_tool_mcp_script() -> String {
+    r#"while read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); [ -z "$id" ] && continue
+  case "$line" in
+    *tools/list*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"read_file","annotations":{"readOnlyHint":true},"inputSchema":{"type":"object"}},{"name":"write_file","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *tools/call*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"done"}]}}\n' "$id" ;;
+    *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+  esac
+done"#
+        .to_string()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tool_policies_limit_gateway_run_mcp_tools() {
+    let gw = gateway(false).await;
+    let (st, body) = post_raw(
+        &gw.app,
+        "/gateway/admin/mcp",
+        json!({ "name": "files", "transport": "stdio", "command": "sh", "args": ["-c", two_tool_mcp_script()] }),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let offered = |seen: &Seen| -> Vec<String> {
+        seen.lock().unwrap().last().unwrap()["tools"]
+            .as_array()
+            .map(|t| t.iter().filter_map(|t| t["function"]["name"].as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+
+    // An agent in read-only mode only sees tools the server marks read-only.
+    let (st, body) = post_raw(
+        &gw.app,
+        "/gateway/admin/agents",
+        json!({ "name": "reviewer", "model": "auto", "tool_policy": { "mode": "read_only" } }),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/reviewer", "messages": hello() }), &[("x-eay-mcp", "files")]).await;
+    assert_eq!(offered(&gw.seen), ["mcp__files__read_file"]);
+
+    // A key that denies read_file, used with no agent, sees only write_file.
+    let (st, created) =
+        post_raw(&gw.app, "/gateway/admin/keys", json!({ "name": "ci", "tool_policy": { "deny": ["read_file"] } }), &[]).await;
+    assert_eq!(st, StatusCode::OK, "{created}");
+    let secret = serde_json::from_str::<Value>(&created).unwrap()["key"]["key"].as_str().unwrap().to_string();
+    let bearer = format!("Bearer {secret}");
+    post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "auto", "messages": hello() }),
+        &[("x-eay-mcp", "files"), ("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(offered(&gw.seen), ["mcp__files__write_file"]);
+
+    // Agent read-only + key denying read_file: the two together leave nothing, so no tools are sent.
+    post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "agent/reviewer", "messages": hello() }),
+        &[("x-eay-mcp", "files"), ("authorization", &bearer)],
+    )
+    .await;
+    assert!(offered(&gw.seen).is_empty());
+
+    // Unknown modes are rejected, and no key is left behind.
+    let (st, _) = post_raw(&gw.app, "/gateway/admin/keys", json!({ "name": "bad", "tool_policy": { "mode": "yolo" } }), &[]).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    let req = Request::builder().uri("/gateway/admin/keys").body(Body::empty()).unwrap();
+    let resp = gw.app.clone().oneshot(req).await.unwrap();
+    let keys: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let names: Vec<&str> = keys["keys"].as_array().unwrap().iter().filter_map(|k| k["name"].as_str()).collect();
+    assert_eq!(names, ["ci"], "a rejected key must not be created");
+}

@@ -39,7 +39,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd, max_concurrent FROM keys ORDER BY created_at DESC",
+            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd, max_concurrent, tool_policy FROM keys ORDER BY created_at DESC",
             [],
             |r| {
                 let allowed_providers_json: Option<String> = r.get(4)?;
@@ -57,6 +57,7 @@ impl GatewayStore {
                     max_cost_usd: r.get(13)?,
                     default_skills,
                     max_concurrent: r.get(14)?,
+                    tool_policy: r.get::<_, Option<String>>(15)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
                     created_at: r.get(6)?,
                     last_used_at: r.get(7)?,
                     total_requests: r.get(8)?,
@@ -102,6 +103,7 @@ impl GatewayStore {
             max_cost_usd: None,
             default_skills: None,
             max_concurrent: None,
+            tool_policy: Default::default(),
             created_at,
             last_used_at: None,
             total_requests: 0,
@@ -118,6 +120,14 @@ impl GatewayStore {
             params![max_tokens_budget, max_cost_usd, id],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_virtual_key_tool_policy(&self, id: &str, policy: &crate::mcp::ToolPolicy) -> Result<(), String> {
+        policy.validate()?;
+        let json = if policy.is_empty() { None } else { Some(serde_json::to_string(policy).map_err(|e| e.to_string())?) };
+        let conn = self.conn.lock();
+        conn.execute("UPDATE keys SET tool_policy = ?1 WHERE id = ?2", params![json, id]).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -247,7 +257,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at FROM agents ORDER BY name ASC",
+            "SELECT name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy FROM agents ORDER BY name ASC",
             [],
             |r| {
                 let skills_json: String = r.get(3)?;
@@ -261,6 +271,7 @@ impl GatewayStore {
                     personality: r.get(4)?,
                     temperature: r.get(5)?,
                     max_tokens: max_tokens.and_then(|v| u64::try_from(v).ok()),
+                    tool_policy: r.get::<_, Option<String>>(9)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
                     enabled: r.get::<_, i64>(7)? != 0,
                     updated_at: r.get(8)?,
                 })
@@ -282,8 +293,11 @@ impl GatewayStore {
         personality: &str,
         temperature: Option<f64>,
         max_tokens: Option<u64>,
+        tool_policy: &crate::mcp::ToolPolicy,
         enabled: bool,
     ) -> Result<AgentProfile, String> {
+        tool_policy.validate()?;
+        let policy_json = if tool_policy.is_empty() { None } else { Some(serde_json::to_string(tool_policy).map_err(|e| e.to_string())?) };
         let name = name.trim();
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err("Agent name must be non-empty and use only letters, digits, '-' or '_'".into());
@@ -293,7 +307,7 @@ impl GatewayStore {
         let updated_at = now();
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO agents (name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO agents (name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 name,
                 description.trim(),
@@ -304,6 +318,7 @@ impl GatewayStore {
                 max_tokens.map(|v| v as i64),
                 i64::from(enabled),
                 updated_at,
+                policy_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -315,6 +330,7 @@ impl GatewayStore {
             personality: personality.trim().to_string(),
             temperature,
             max_tokens,
+            tool_policy: tool_policy.clone(),
             enabled,
             updated_at,
         })

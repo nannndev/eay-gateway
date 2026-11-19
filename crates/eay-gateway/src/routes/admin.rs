@@ -340,12 +340,16 @@ pub struct CreateKeyPayload {
     max_cost_usd: Option<f64>,
     default_skills: Option<Vec<String>>,
     max_concurrent: Option<i64>,
+    #[serde(default)]
+    tool_policy: eay_gateway_core::mcp::ToolPolicy,
 }
 
 pub async fn handle_create_key(
     State(engine): State<GatewayEngine>,
     Json(payload): Json<CreateKeyPayload>,
 ) -> Result<Json<Value>, GatewayError> {
+    // Validate before creating anything, so a bad policy does not leave a key behind.
+    payload.tool_policy.validate().map_err(GatewayError::BadRequest)?;
     let (mut record, secret) = engine
         .store
         .create_virtual_key(&payload.name, payload.allowed_providers, payload.rate_limit_per_min)
@@ -358,6 +362,10 @@ pub async fn handle_create_key(
     if let Some(n) = payload.max_concurrent.filter(|n| *n > 0) {
         engine.store.set_virtual_key_concurrency(&record.id, Some(n)).map_err(GatewayError::Internal)?;
         record.max_concurrent = Some(n);
+    }
+    if !payload.tool_policy.is_empty() {
+        engine.store.set_virtual_key_tool_policy(&record.id, &payload.tool_policy).map_err(GatewayError::Internal)?;
+        record.tool_policy = payload.tool_policy.clone();
     }
     if let Some(skills) = payload.default_skills.filter(|s| !s.is_empty()) {
         engine.store.set_virtual_key_skills(&record.id, Some(skills.clone())).map_err(GatewayError::Internal)?;
@@ -431,6 +439,9 @@ pub struct SaveAgentPayload {
     personality: String,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
+    /// `{"mode":"read_only","allow":["fs/*"],"deny":["write_file"]}` for gateway-run MCP tools.
+    #[serde(default)]
+    tool_policy: eay_gateway_core::mcp::ToolPolicy,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -447,7 +458,7 @@ pub async fn handle_save_agent(State(engine): State<GatewayEngine>, Json(p): Jso
     let name = p.name.as_deref().unwrap_or("");
     let agent = engine
         .store
-        .save_agent(name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, p.enabled)
+        .save_agent(name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, &p.tool_policy, p.enabled)
         .map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "agent": agent })))
 }
@@ -459,7 +470,7 @@ pub async fn handle_put_agent(
 ) -> Result<Json<Value>, GatewayError> {
     let agent = engine
         .store
-        .save_agent(&name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, p.enabled)
+        .save_agent(&name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, &p.tool_policy, p.enabled)
         .map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "agent": agent })))
 }
