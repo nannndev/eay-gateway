@@ -19,13 +19,30 @@ status is **502** with the last upstream error in the message.
 
 Also served at `/gateway/v1/chat/completions`.
 
+#### Thinking and reasoning effort
+
+Ask for more reasoning with `reasoning_effort` (`minimal`, `low`, `medium`, `high`), Anthropic's
+`thinking`, or Responses' `reasoning.effort`. The gateway translates it for whichever provider
+answers:
+
+| Upstream | Sent as |
+|---|---|
+| Claude (subscription or API key) | `thinking` with a token budget (`low` ≈ 4k, `medium` ≈ 10k, `high` ≈ 32k); `max_tokens` is raised above the budget and `temperature` is dropped, as Anthropic requires |
+| ChatGPT / Codex | `reasoning.effort`, with reasoning summaries |
+| Gemini | `thinkingConfig.thinkingBudget` |
+| OpenAI-compatible APIs | `reasoning_effort`, unchanged |
+
+The model's reasoning comes back as `reasoning_content` in chat chunks and as `thinking` blocks to
+Anthropic clients. Claude's signed thinking is passed back to Claude with tool results, as Claude
+requires for tool use with thinking. Session memory stores answers, not reasoning.
+
 ### `POST /v1/messages`
 
-Anthropic-native Messages endpoint (used by Claude Code CLI and Anthropic SDKs). Translates requests (`system`, `messages` with text/images/PDFs/`tool_use`/`tool_result`, `tools`, `stream`) and returns Anthropic-format JSON or SSE (`message_start`, `content_block_delta`, `message_stop`). Bare Claude model ids automatically resolve to your connected `claude` OAuth or `anthropic` provider (or fall back to `auto`). Also served at `/gateway/v1/messages`.
+Anthropic-native Messages endpoint (used by Claude Code CLI and Anthropic SDKs). Translates requests (`system`, `messages` with text/images/PDFs/`tool_use`/`tool_result`, `tools`, `stream`) and returns Anthropic-format JSON or SSE (`message_start`, `content_block_delta`, `message_stop`). Bare Claude model ids automatically resolve to your connected `claude` OAuth or `anthropic` provider (or fall back to `auto`). `thinking` (Claude Code's "think hard") works with every provider; see [Thinking and reasoning effort](#thinking-and-reasoning-effort). Also served at `/gateway/v1/messages`.
 
 ### `POST /v1/responses`
 
-OpenAI Responses endpoint (`instructions`, `input`, `max_output_tokens`, `temperature`, `stream`). Translates requests and returns `response` objects or SSE. Also served at `/gateway/v1/responses`.
+OpenAI Responses endpoint (`instructions`, `input`, `max_output_tokens`, `temperature`, `reasoning.effort`, function `tools`, `stream`). Translates requests and returns `response` objects or SSE. Also served at `/gateway/v1/responses`.
 
 ### `POST /v1/embeddings`
 
@@ -75,7 +92,7 @@ accepted, as they come from this machine. A `gw-sk-…` key must exist and be en
 | | |
 |---|---|
 | `GET /gateway/admin/keys` | List keys (prefix only, plus usage totals and limits) |
-| `POST /gateway/admin/keys` | `{"name":"ci","allowed_providers":["deepseek"],"rate_limit_per_min":30,"max_tokens_budget":100000,"max_cost_usd":5.0,"max_concurrent":4,"default_skills":["rust"]}` → returns the secret `key` once. `rate_limit_per_min` counts client requests (failover attempts and MCP tool rounds inside one request do not count extra). `max_concurrent` caps requests in flight at once (a streamed response holds its slot until it ends); over the cap → `429` |
+| `POST /gateway/admin/keys` | `{"name":"ci","allowed_providers":["deepseek"],"rate_limit_per_min":30,"max_tokens_budget":100000,"max_cost_usd":5.0,"max_concurrent":4,"default_skills":["rust"],"tool_policy":{"mode":"read_only"}}` → returns the secret `key` once. `tool_policy` limits gateway-run MCP tools (see [Tool policies](#tool-policies)). `rate_limit_per_min` counts client requests (failover attempts and MCP tool rounds inside one request do not count extra). `max_concurrent` caps requests in flight at once (a streamed response holds its slot until it ends); over the cap → `429` |
 | `PATCH /gateway/admin/keys/:id/toggle` | Enable / disable |
 | `DELETE /gateway/admin/keys/:id` | Delete |
 
@@ -155,7 +172,7 @@ Without a token, `/gateway/admin/*` and the `x-eay-mcp` header only work when th
 | `PATCH /gateway/admin/skills/:name/toggle` | Enable / disable a skill |
 | `DELETE /gateway/admin/skills/:name` | Delete a skill |
 | `GET /gateway/admin/agents` | List saved Agent Personality profiles |
-| `POST /gateway/admin/agents` | `{"name":"senior-rust","model":"auto/coding","skills":["rust"],"personality":"…","temperature":0.2}` (usable via `model: "agent/senior-rust"`) |
+| `POST /gateway/admin/agents` | `{"name":"senior-rust","model":"auto/coding","skills":["rust"],"personality":"…","temperature":0.2,"tool_policy":{"allow":["github/*"]}}` (usable via `model: "agent/senior-rust"`) |
 | `PUT /gateway/admin/agents/:name` | Create or update agent by name |
 | `DELETE /gateway/admin/agents/:name` | Delete an agent profile |
 | `DELETE /gateway/admin/sessions/:id` | Clear saved conversation history for a session id |
@@ -175,6 +192,26 @@ Without a token, `/gateway/admin/*` and the `x-eay-mcp` header only work when th
 Tool names shown to the model are `mcp__<server>__<tool>`; names over 64 characters or with characters outside `[A-Za-z0-9_-]` are shortened to a stable `…_<hash>` form, which the gateway maps back to the real tool.
 
 Remote (`http`) servers keep their `mcp-session-id` between calls and start a new session if the server answers `404`. Image results are passed to the model as images; audio and binary resources become a short note. When a local server fails, the error includes the last lines it wrote to stderr.
+
+### Tool policies
+
+A `tool_policy` on an agent or a virtual key decides which MCP tools the **gateway** runs for it
+(`x-eay-mcp`, subagents with `mcp`). Tools that coding clients run themselves (Claude Code, Codex,
+Cursor) are not affected; their permission modes stay in the client.
+
+```json
+{ "mode": "read_only", "allow": ["github/*", "fs/read_file"], "deny": ["delete_issue"] }
+```
+
+| Field | Effect |
+|---|---|
+| `mode` | `all` (default), `read_only` (only tools the server marks `readOnlyHint`), or `none` |
+| `allow` | If set, only matching tools are offered: `server/tool`, `server/*`, or a bare `tool` name |
+| `deny` | Matching tools are never offered |
+
+When both the agent and the key have a policy, a tool must pass both. Disallowed tools are left
+out of the request, and a call to one anyway is refused. `read_only` relies on the MCP server's own
+`readOnlyHint`; a server that does not set it exposes nothing in that mode.
 
 Local (`stdio`) MCP servers are started once and kept running between calls, so stateful servers (browsers, database sessions) keep their state. An idle process exits after 10 minutes; editing, disabling or deleting a server stops it. Calls to one server run one at a time; `tools/call` may take up to 120 s.
 | `POST /gateway/admin/mcp/:name/call` | Run one tool directly: `{"tool":"read_file","arguments":{…}}` → `{"ok":true,"output":"…","duration_ms":12}` |

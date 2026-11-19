@@ -10,6 +10,8 @@ All notable changes to `eay-gateway` are documented in this file.
 - `x-eay-session-id` memory is private to each virtual key (and to the no-key local caller).
 
 ### Added
+- **Thinking / reasoning effort works with every provider:** Claude Code's `thinking`, OpenAI `reasoning_effort` and Codex `reasoning.effort` are translated for Claude, Codex, Gemini and OpenAI-compatible upstreams; reasoning streams back to clients, and Claude's signed thinking is replayed with tool results.
+- **Tool policies** for gateway-run MCP tools on agents and keys: `mode` (`all`, `read_only`, `none`), `allow` and `deny` lists; the stricter of agent and key wins.
 - **Install and run:** Homebrew formula (`brew install nannndev/tap/eay-gateway`), a container image on `ghcr.io/nannndev/eay-gateway` (amd64/arm64) with `compose.yaml`, and `eay-gateway service install|uninstall|status` to start at login on macOS, Linux and Windows. `--version` flag.
 - **Integrations guide** for Claude Code, Codex, Cursor, Cline, SDKs, desktop and web apps.
 - Per-key `max_concurrent` (requests in flight; streamed responses hold their slot until they end).
@@ -30,6 +32,8 @@ All notable changes to `eay-gateway` are documented in this file.
 - `~` in MCP commands and arguments expands to the home folder.
 
 ### Fixed
+- Anthropic streams sent text deltas with index 0 even when a thinking or tool block came first.
+- `/v1/responses` dropped Codex CLI's `reasoning.effort`.
 - Session memory is now saved for streamed replies (it only worked for non-streaming requests).
 
 ### Upgrade notes

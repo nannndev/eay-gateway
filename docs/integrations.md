@@ -29,6 +29,10 @@ claude
 Claude Code sends Claude model names. If a Claude subscription or Anthropic key is connected, they
 go there; otherwise they are answered by `auto`, so Claude Code keeps working with other providers.
 
+Claude Code's permission modes (plan, accept edits, bypass) run in Claude Code itself and work
+unchanged. "Think" / "think hard" / "ultrathink" are forwarded as the matching reasoning effort to
+whichever provider answers.
+
 ### Codex CLI
 
 `~/.codex/config.toml`:
@@ -172,6 +176,18 @@ A page in the browser can call the gateway directly if its origin is allowed:
 manages providers, keys, MCP servers and agents through the admin API.
 
 ## Agents and orchestration
+
+Permission modes in coding tools (Claude Code's plan mode, Codex's approval modes, Cursor's
+Ask/Agent) are handled by those tools and need nothing from the gateway. When the **gateway** runs
+tools for you (`x-eay-mcp`, subagents), limit them with a [tool policy](api.md#tool-policies) on
+the agent or key, for example a read-only reviewer:
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' -d '{
+  "name": "reviewer", "model": "auto", "personality": "Review code, never change it.",
+  "tool_policy": { "mode": "read_only" }
+}'
+```
 
 The admin API runs background agents for you:
 
