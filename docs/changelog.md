@@ -2,6 +2,11 @@
 
 All notable changes to **eay-gateway** are listed below.
 
+## Unreleased
+
+- **Agent teams:** a lead agent hands work to your saved agents (reviewer, tester, …), several at
+  once, and eay-console shows the team as a live tree.
+
 ## v0.3.1 — 2026-11-19
 
 - **Linux binaries run everywhere:** static builds (no glibc or OpenSSL needed) for x64 and the new

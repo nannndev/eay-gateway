@@ -182,6 +182,7 @@ Without a token, `/gateway/admin/*` and the `x-eay-mcp` header only work when th
 | `GET /gateway/admin/activity` | JSON snapshot of recent `events` and `subagents` |
 | `GET /gateway/admin/subagents` | List active and recent background subagent runs |
 | `POST /gateway/admin/subagents` | Spawn a background subagent `{"role":"Reviewer","model":"auto","prompt":"…","skills":[…],"mcp":["*"],"parent_id":"sub_…","api_key":"gw-sk-…"}`. `mcp` gives it MCP tools, `parent_id` links it into an agent tree, `api_key` (or header `x-eay-key`) makes it run under that key's budget and limits. At most 8 run at once; the rest wait in `queued` |
+| `GET /gateway/admin/subagents/tree` | Runs nested by `parent_id` (`children` arrays). Runs whose parent is a client request are roots, so a lead's subagents appear side by side |
 | `GET /gateway/admin/subagents/:id` | Get subagent status and output. `?wait=60` long-polls up to that many seconds (max 300) until it finishes, so an orchestrator can join on a child |
 | `POST /gateway/admin/subagents/:id/cancel` | Stop a queued or running subagent (phase becomes `cancelled`) |
 | `GET /gateway/admin/approvals` | Tool calls waiting for a person: `id`, `run_id`, `agent`, `tool`, `arguments`, `expires_at` |
@@ -225,9 +226,16 @@ client may time out first.
 
 #### Subagents started by the model
 
-With `max_subagents` set, the model gets an `eay_delegate` tool (`role`, `task`, optional `model`).
-Calling it starts a subagent, waits for it (up to 10 minutes) and returns its answer as the tool
-result. Subagents:
+With `max_subagents` set, the model gets an `eay_delegate` tool (`role`, `task`, optional `model` or
+`agent`). Calling it starts a subagent, waits for it (up to 10 minutes) and returns its answer as the
+tool result.
+
+- **Teams:** the tool lists your saved agents (name and description). With `agent: "tester"` the
+  subagent runs as `agent/tester`, with that agent's model, skills, personality and tool policy.
+- **Parallel:** every `eay_delegate` call in one model reply runs at the same time (still at most 8
+  subagents active on the gateway), and the results come back in the order the model asked.
+
+Subagents:
 
 - run under the same key, so its budget and limits apply;
 - get a policy at least as strict as their parent's (strictest mode and approval, intersected

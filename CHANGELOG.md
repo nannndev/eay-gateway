@@ -2,6 +2,13 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Agent teams:** a model with a subagent budget can hand work to your saved agents
+  (`eay_delegate` lists them and takes `agent`), and all delegations in one reply run in parallel.
+- `GET /gateway/admin/subagents/tree`: runs nested by parent, for team views.
+
 ## [0.3.1] - 2026-11-19
 
 ### Changed

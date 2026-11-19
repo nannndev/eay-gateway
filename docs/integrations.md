@@ -208,7 +208,18 @@ curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: appli
 ```
 
 Let a model split work by itself: give its agent a subagent budget, and it gets an
-`eay_delegate` tool. Add approval so it cannot change anything without you:
+`eay_delegate` tool. Save a few specialist agents and the lead can hand work to them, several at
+once:
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' \
+  -d '{"name":"reviewer","model":"auto","description":"Reviews code for bugs","tool_policy":{"mode":"read_only"}}'
+curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' \
+  -d '{"name":"tester","model":"auto","description":"Writes unit tests"}'
+```
+
+eay-console's Activity tab shows the team as a tree: who handed work to whom, live status and each
+result. Add approval so a team cannot change anything without you:
 
 ```sh
 curl -X POST http://127.0.0.1:20129/gateway/admin/agents -H 'content-type: application/json' -d '{
