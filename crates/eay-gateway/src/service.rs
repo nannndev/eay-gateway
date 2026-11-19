@@ -46,6 +46,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))] // Windows uses Task Scheduler, no files
 fn home() -> Result<PathBuf, String> {
     std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(PathBuf::from).map_err(|_| "cannot find your home folder".into())
 }
