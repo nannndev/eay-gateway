@@ -14,6 +14,7 @@ use eay_gateway_core::providers::{OAUTH_PROVIDERS, PROVIDERS};
 use eay_gateway_core::store::{VirtualKeyRecord, KEY_PREFIX};
 use eay_gateway_core::translate::{
     anthropic_to_openai, openai_completion_to_anthropic, openai_completion_to_responses, responses_to_openai, OpenAiToAnthropicSse,
+    OpenAiToResponsesSse,
 };
 use futures::StreamExt;
 use serde::Deserialize;
@@ -80,12 +81,21 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
     let max_context_chars =
         headers.get("x-eay-max-context-chars").and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
     let redact_secrets = headers.get("x-eay-redact").and_then(|v| v.to_str().ok()).is_some_and(|v| v == "true" || v == "1");
+    // MCP runs local commands, so a rebound browser origin must not be able to trigger it.
     let mcp_servers = headers
         .get("x-eay-mcp")
+        .filter(|_| super::is_loopback_host(headers))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
         .unwrap_or_default();
-    ChatOptions { skills, session_id, max_context_chars, redact_secrets, mcp_servers, ..Default::default() }
+    // Lets a client (the console playground) follow its own request on /gateway/admin/events.
+    let run_id = headers
+        .get("x-eay-run-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .map(String::from);
+    ChatOptions { skills, session_id, max_context_chars, redact_secrets, mcp_servers, run_id, ..Default::default() }
 }
 
 /// A presented key must be a valid, enabled virtual key; no key means the local app (anonymous).
@@ -235,7 +245,17 @@ pub async fn handle_responses(State(engine): State<GatewayEngine>, headers: Head
     let oa_payload = responses_to_openai(&payload);
     match engine.chat_completions_with_options(key, oa_payload, opts).await {
         Ok(ChatReply::Stream(frames)) => {
-            let mut resp = Response::new(Body::from_stream(frames));
+            // Re-encode chat chunks as Responses events; the tail closes the response even if upstream never sent [DONE].
+            let conv = std::sync::Arc::new(std::sync::Mutex::new(OpenAiToResponsesSse::new(requested_model)));
+            let tail_conv = conv.clone();
+            let mapped = frames
+                .map(move |item| {
+                    item.map(|bytes| {
+                        Bytes::from(conv.lock().map(|mut c| c.feed_sse_chunk(&String::from_utf8_lossy(&bytes))).unwrap_or_default())
+                    })
+                })
+                .chain(futures::stream::once(async move { Ok(Bytes::from(tail_conv.lock().map(|mut c| c.finish()).unwrap_or_default())) }));
+            let mut resp = Response::new(Body::from_stream(mapped));
             let h = resp.headers_mut();
             h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
             h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
@@ -319,12 +339,17 @@ pub struct CreateKeyPayload {
     max_tokens_budget: Option<i64>,
     max_cost_usd: Option<f64>,
     default_skills: Option<Vec<String>>,
+    max_concurrent: Option<i64>,
+    #[serde(default)]
+    tool_policy: eay_gateway_core::mcp::ToolPolicy,
 }
 
 pub async fn handle_create_key(
     State(engine): State<GatewayEngine>,
     Json(payload): Json<CreateKeyPayload>,
 ) -> Result<Json<Value>, GatewayError> {
+    // Validate before creating anything, so a bad policy does not leave a key behind.
+    payload.tool_policy.validate().map_err(GatewayError::BadRequest)?;
     let (mut record, secret) = engine
         .store
         .create_virtual_key(&payload.name, payload.allowed_providers, payload.rate_limit_per_min)
@@ -333,6 +358,14 @@ pub async fn handle_create_key(
         engine.store.set_virtual_key_limits(&record.id, payload.max_tokens_budget, payload.max_cost_usd).map_err(GatewayError::Internal)?;
         record.max_tokens_budget = payload.max_tokens_budget;
         record.max_cost_usd = payload.max_cost_usd;
+    }
+    if let Some(n) = payload.max_concurrent.filter(|n| *n > 0) {
+        engine.store.set_virtual_key_concurrency(&record.id, Some(n)).map_err(GatewayError::Internal)?;
+        record.max_concurrent = Some(n);
+    }
+    if !payload.tool_policy.is_empty() {
+        engine.store.set_virtual_key_tool_policy(&record.id, &payload.tool_policy).map_err(GatewayError::Internal)?;
+        record.tool_policy = payload.tool_policy.clone();
     }
     if let Some(skills) = payload.default_skills.filter(|s| !s.is_empty()) {
         engine.store.set_virtual_key_skills(&record.id, Some(skills.clone())).map_err(GatewayError::Internal)?;
@@ -406,6 +439,9 @@ pub struct SaveAgentPayload {
     personality: String,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
+    /// `{"mode":"read_only","allow":["fs/*"],"deny":["write_file"]}` for gateway-run MCP tools.
+    #[serde(default)]
+    tool_policy: eay_gateway_core::mcp::ToolPolicy,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -422,7 +458,7 @@ pub async fn handle_save_agent(State(engine): State<GatewayEngine>, Json(p): Jso
     let name = p.name.as_deref().unwrap_or("");
     let agent = engine
         .store
-        .save_agent(name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, p.enabled)
+        .save_agent(name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, &p.tool_policy, p.enabled)
         .map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "agent": agent })))
 }
@@ -434,7 +470,7 @@ pub async fn handle_put_agent(
 ) -> Result<Json<Value>, GatewayError> {
     let agent = engine
         .store
-        .save_agent(&name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, p.enabled)
+        .save_agent(&name, &p.description, &p.model, &p.skills, &p.personality, p.temperature, p.max_tokens, &p.tool_policy, p.enabled)
         .map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "agent": agent })))
 }
@@ -444,8 +480,41 @@ pub async fn handle_delete_agent(State(engine): State<GatewayEngine>, Path(name)
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }
 
+#[derive(Deserialize)]
+pub struct ListQuery {
+    limit: Option<usize>,
+}
+
+/// Sessions with their message counts, newest first.
+pub async fn handle_list_sessions(State(engine): State<GatewayEngine>, Query(q): Query<ListQuery>) -> Json<Value> {
+    Json(json!({ "sessions": engine.store.list_sessions(q.limit.unwrap_or(100).min(1000)) }))
+}
+
+/// One session: its messages and the subagents that ran in it. `id` is the full storage id from
+/// the list (`key:<key-id>:<session>` or `local:<session>`); a bare id means the local session.
+pub async fn handle_get_session(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Result<Json<Value>, GatewayError> {
+    let storage = if engine.store.session_updated_at(&id).is_some() { id } else { eay_gateway_core::engine::session_storage_id(None, &id) };
+    let updated_at = engine.store.session_updated_at(&storage).ok_or_else(|| GatewayError::NotFound("Session not found".into()))?;
+    let name = storage.rsplit(':').next().unwrap_or(&storage).to_string();
+    let subagents: Vec<Value> = engine
+        .activity
+        .list_runs()
+        .into_iter()
+        .filter(|r| r.parent_session.as_deref() == Some(name.as_str()))
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .collect();
+    Ok(Json(json!({
+        "id": storage, "session": name, "updated_at": updated_at,
+        "messages": engine.store.get_session_messages(&storage),
+        "subagents": subagents,
+    })))
+}
+
 pub async fn handle_delete_session(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
-    let deleted = engine.store.delete_session(&id).unwrap_or(false);
+    // Admin can pass a full storage id (`key:<id>:<sid>`) or a bare id for local (no-key) sessions.
+    let raw = engine.store.delete_session(&id).unwrap_or(false);
+    let local = engine.store.delete_session(&eay_gateway_core::engine::session_storage_id(None, &id)).unwrap_or(false);
+    let deleted = raw || local;
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }
 
@@ -491,6 +560,13 @@ pub struct SpawnSubagentPayload {
     #[serde(default)]
     skills: Vec<String>,
     session_id: Option<String>,
+    /// MCP servers the subagent may use (`["*"]` = all enabled).
+    #[serde(default)]
+    mcp: Vec<String>,
+    /// Run or request id of the agent that spawned this one.
+    parent_id: Option<String>,
+    /// Gateway key (`gw-sk-…`) whose budget and limits the subagent runs under.
+    api_key: Option<String>,
 }
 
 pub async fn handle_list_subagents(State(engine): State<GatewayEngine>) -> Json<Value> {
@@ -499,23 +575,81 @@ pub async fn handle_list_subagents(State(engine): State<GatewayEngine>) -> Json<
 
 pub async fn handle_spawn_subagent(
     State(engine): State<GatewayEngine>,
+    headers: HeaderMap,
     Json(p): Json<SpawnSubagentPayload>,
 ) -> Result<Json<Value>, GatewayError> {
     if p.role.trim().is_empty() || p.prompt.trim().is_empty() {
         return Err(GatewayError::BadRequest("Both 'role' and 'prompt' are required".into()));
     }
-    let opts = ChatOptions { skills: p.skills, session_id: p.session_id, ..Default::default() };
-    let run = engine.spawn_subagent(p.role, p.model, p.prompt, p.system, opts);
+    // Key from the body, else from `x-eay-key` (Authorization carries the admin token here).
+    let key = match p.api_key.as_deref().or_else(|| headers.get("x-eay-key").and_then(|v| v.to_str().ok())).map(str::trim) {
+        Some(secret) if !secret.is_empty() => match engine.store.find_virtual_key(secret) {
+            Some(k) if k.enabled => Some(k),
+            Some(_) => return Err(GatewayError::Unauthorized("API key is disabled".into())),
+            None => return Err(GatewayError::Unauthorized("Invalid API key".into())),
+        },
+        _ => None,
+    };
+    let opts = ChatOptions { skills: p.skills, session_id: p.session_id, mcp_servers: p.mcp, ..Default::default() };
+    let run = engine.spawn_subagent(key, p.role, p.model, p.prompt, p.system, p.parent_id, opts);
     Ok(Json(json!({ "subagent": run })))
 }
 
-pub async fn handle_get_subagent(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Result<Json<Value>, GatewayError> {
-    let run = engine.activity.get_run(&id).ok_or_else(|| GatewayError::NotFound("Subagent not found".into()))?;
+#[derive(Deserialize)]
+pub struct GetSubagentQuery {
+    /// Seconds to wait for the run to finish before answering (max 300).
+    wait: Option<u64>,
+}
+
+/// With `?wait=N`, long-polls until the run finishes so an orchestrator can join on a child.
+pub async fn handle_get_subagent(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Query(q): Query<GetSubagentQuery>,
+) -> Result<Json<Value>, GatewayError> {
+    let run = match q.wait.filter(|w| *w > 0) {
+        Some(w) => engine.activity.wait_run(&id, std::time::Duration::from_secs(w.min(300))).await,
+        None => engine.activity.get_run(&id),
+    };
+    let run = run.ok_or_else(|| GatewayError::NotFound("Subagent not found".into()))?;
     Ok(Json(json!({ "subagent": run })))
+}
+
+/// Tool calls waiting for a person (`approval: manual` or `manual_for_writes`).
+pub async fn handle_list_approvals(State(engine): State<GatewayEngine>) -> Json<Value> {
+    Json(json!({ "approvals": engine.activity.list_approvals() }))
+}
+
+#[derive(Deserialize)]
+pub struct ApprovalDecision {
+    approve: bool,
+}
+
+pub async fn handle_resolve_approval(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Json(d): Json<ApprovalDecision>,
+) -> Result<Json<Value>, GatewayError> {
+    if !engine.activity.resolve_approval(&id, d.approve) {
+        return Err(GatewayError::NotFound("No pending approval with that id (already answered or expired)".into()));
+    }
+    Ok(Json(json!({ "status": if d.approve { "approved" } else { "denied" } })))
+}
+
+pub async fn handle_cancel_subagent(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Result<Json<Value>, GatewayError> {
+    if engine.activity.get_run(&id).is_none() {
+        return Err(GatewayError::NotFound("Subagent not found".into()));
+    }
+    let cancelled = engine.activity.cancel_run(&id);
+    if let Some(r) = engine.activity.get_run(&id).filter(|_| cancelled) {
+        engine.store.save_subagent_run(&r);
+    }
+    Ok(Json(json!({ "status": if cancelled { "cancelled" } else { "not_running" } })))
 }
 
 pub async fn handle_delete_subagent(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
     let deleted = engine.activity.delete_run(&id);
+    engine.store.delete_subagent_run(&id);
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }
 
@@ -557,12 +691,55 @@ pub async fn handle_save_mcp(State(engine): State<GatewayEngine>, Json(p): Json<
 
 pub async fn handle_toggle_mcp(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Result<Json<Value>, GatewayError> {
     let rec = engine.store.toggle_mcp_server(&name).map_err(GatewayError::NotFound)?;
+    eay_gateway_core::mcp::shutdown_server(&name);
     Ok(Json(json!({ "mcp_server": rec })))
 }
 
 pub async fn handle_delete_mcp(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Json<Value> {
     let deleted = engine.store.delete_mcp_server(&name).unwrap_or(false);
+    eay_gateway_core::mcp::shutdown_server(&name);
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
+}
+
+/// Bulk-adds servers from a pasted Claude Desktop / Cursor / Claude Code / VS Code MCP config.
+pub async fn handle_import_mcp(State(engine): State<GatewayEngine>, Json(cfg): Json<Value>) -> Result<Json<Value>, GatewayError> {
+    let parsed = eay_gateway_core::mcp::parse_client_config(&cfg);
+    if parsed.is_empty() {
+        return Err(GatewayError::BadRequest("No MCP servers found; paste a JSON object with an \"mcpServers\" map".into()));
+    }
+    let (mut imported, mut errors) = (Vec::new(), Vec::new());
+    for m in parsed {
+        match engine.store.save_mcp_server(&m.name, &m.transport, m.command.as_deref(), &m.args, &m.env, m.url.as_deref(), &m.headers, true)
+        {
+            Ok(rec) => imported.push(rec.name),
+            Err(e) => errors.push(json!({ "name": m.name, "error": e })),
+        }
+    }
+    Ok(Json(json!({ "imported": imported, "errors": errors })))
+}
+
+#[derive(Deserialize)]
+pub struct CallMcpPayload {
+    tool: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+/// Runs one tool directly, so a connector can be tried without a model in the loop.
+pub async fn handle_mcp_call(
+    State(engine): State<GatewayEngine>,
+    Path(name): Path<String>,
+    Json(p): Json<CallMcpPayload>,
+) -> Result<Json<Value>, GatewayError> {
+    let srv = engine.store.get_mcp_server(&name).ok_or_else(|| GatewayError::NotFound("MCP server not found".into()))?;
+    let args = if p.arguments.is_null() { json!({}) } else { p.arguments };
+    let t = std::time::Instant::now();
+    let res = eay_gateway_core::mcp::call_tool(&engine.http_client, &srv, &p.tool, args).await;
+    let ms = t.elapsed().as_millis() as u64;
+    Ok(Json(match res {
+        Ok(out) => json!({ "ok": true, "output": out, "duration_ms": ms }),
+        Err(e) => json!({ "ok": false, "output": e, "duration_ms": ms }),
+    }))
 }
 
 pub async fn handle_mcp_tools(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Result<Json<Value>, GatewayError> {

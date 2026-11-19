@@ -2,6 +2,23 @@
 
 All notable changes to **eay-gateway** are listed below.
 
+## v0.3.0 — 2026-11-19
+
+### Highlights
+- **Agents that delegate:** a model can start its own subagents (`max_subagents`), with manual approval for tools that change things, and a sessions API to see what happened.
+- **Thinking everywhere:** reasoning effort and Claude thinking are translated for every provider; reasoning streams back to clients.
+- **Tool policies:** limit which MCP tools the gateway runs per agent or key (`read_only`, allow/deny lists).
+- **Easy install:** Homebrew, Docker image, and `eay-gateway service install` to start at login; new [Integrations](integrations.md) guide.
+- **Safer by default:** admin API and MCP tools are loopback-only without an admin token (blocks DNS rebinding); new read-only admin token; session memory is private per key.
+- **Codex CLI works end to end:** `/v1/responses` streams real Responses events and carries function tools and tool-call history.
+- **Multi-agent:** cancel, join (`?wait=`), parent trees, MCP access and per-key limits for subagents; at most 8 at once; history survives restarts.
+- **Multi-access:** per-key `max_concurrent`; rate limits count requests, not failover attempts.
+- **MCP:** servers stay running between calls, config import from other apps, run a tool directly, long tool names shortened, image results passed as images, stderr in errors.
+- **Limits:** 64 MB request bodies, 300 s upstream silence cut-off.
+- **Headless:** the web console moved to its own app, [eay-console](https://github.com/nannndev/eay-console); the gateway allows it through `--console-origin` and refuses other web pages.
+
+Upgrade notes: the console moved out of `/ui` to [eay-console](https://github.com/nannndev/eay-console); older sessions are not loaded (they were not tied to a key); reaching admin through a non-loopback hostname without `--admin-token` now returns `403`.
+
 ## v0.2.0 — 2026-11-18
 
 ### Highlights

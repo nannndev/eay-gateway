@@ -2,6 +2,48 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
+## [0.3.0] - 2026-11-19
+
+### Security
+- Without an admin token, `/gateway/admin/*` and the `x-eay-mcp` header only accept loopback `Host` headers. This blocks DNS rebinding from a web page, which could otherwise register a local (stdio) MCP server and run a command.
+- Admin token is compared in constant time. New read-only admin token (`--admin-read-token` / `EAY_GATEWAY_ADMIN_READ_TOKEN`) that can only make `GET` requests.
+- `x-eay-session-id` memory is private to each virtual key (and to the no-key local caller).
+
+### Added
+- **Model-driven subagents:** with `tool_policy.max_subagents`, the model gets an `eay_delegate` tool to hand subtasks to subagents; they inherit a policy at least as strict as their parent's and stop at depth 3.
+- **Manual approval** for gateway-run tools: `tool_policy.approval` (`auto`, `manual`, `manual_for_writes`), `GET /gateway/admin/approvals`, `POST /gateway/admin/approvals/:id`; unanswered calls are denied after 5 minutes.
+- **Sessions API:** `GET /gateway/admin/sessions` and `GET /gateway/admin/sessions/:id` (messages and the session's subagents).
+- **Thinking / reasoning effort works with every provider:** Claude Code's `thinking`, OpenAI `reasoning_effort` and Codex `reasoning.effort` are translated for Claude, Codex, Gemini and OpenAI-compatible upstreams; reasoning streams back to clients, and Claude's signed thinking is replayed with tool results.
+- **Tool policies** for gateway-run MCP tools on agents and keys: `mode` (`all`, `read_only`, `none`), `allow` and `deny` lists; the stricter of agent and key wins.
+- **Install and run:** Homebrew formula (`brew install nannndev/tap/eay-gateway`), a container image on `ghcr.io/nannndev/eay-gateway` (amd64/arm64) with `compose.yaml`, and `eay-gateway service install|uninstall|status` to start at login on macOS, Linux and Windows. `--version` flag.
+- **Integrations guide** for Claude Code, Codex, Cursor, Cline, SDKs, desktop and web apps.
+- Per-key `max_concurrent` (requests in flight; streamed responses hold their slot until they end).
+- Subagents: `POST /gateway/admin/subagents/:id/cancel`, `GET …/:id?wait=N` to join on a run, `parent_id`, `mcp`, `api_key` (runs under that key's limits), at most 8 running at once, history kept across restarts.
+- `x-eay-run-id` header to follow your own request on `/gateway/admin/events`.
+- MCP: `POST /gateway/admin/mcp/import` (Claude Desktop / Claude Code / Cursor / VS Code configs), `POST /gateway/admin/mcp/:name/call` to run one tool directly.
+- `--console-origin` / `EAY_GATEWAY_CONSOLE_ORIGINS`: browser origins allowed to call the gateway (CORS, including Chrome's Private Network Access preflight). `http://localhost:<port>` is always allowed.
+- End-to-end tests against a mock upstream and mock MCP servers.
+
+### Changed
+- **The web console is no longer embedded.** It moved to [eay-console](https://github.com/nannndev/eay-console), a separate app that calls the gateway's API. `GET /` returns a JSON description and `/ui` is gone.
+- Browser requests from origins that are not allowed now get `403` (requests without an `Origin`, like CLIs and SDKs, are unaffected).
+- `/v1/responses` streams real Responses events (text, function calls, usage) and forwards function tools, `tool_choice` and `function_call` history, so Codex CLI tool use works through the gateway.
+- Local MCP servers stay running between calls (stateful servers keep their state); remote ones reuse their `mcp-session-id`. Tool lists are cached.
+- MCP tool names over 64 characters are shortened to a stable form; image results reach the model as images; errors include the server's stderr.
+- `rate_limit_per_min` counts client requests, not failover attempts.
+- Request body limit raised from 2 MB to 64 MB. Upstreams silent for 300 s are cut off; connect timeout 10 s.
+- `~` in MCP commands and arguments expands to the home folder.
+
+### Fixed
+- Anthropic streams sent text deltas with index 0 even when a thinking or tool block came first.
+- `/v1/responses` dropped Codex CLI's `reasoning.effort`.
+- Session memory is now saved for streamed replies (it only worked for non-streaming requests).
+
+### Upgrade notes
+- The console is no longer at `/ui`. Run [eay-console](https://github.com/nannndev/eay-console) instead; a hosted copy needs `--console-origin <its origin>`.
+- Sessions saved before this version are not loaded any more (they were not tied to a key). Delete them with `DELETE /gateway/admin/sessions/:id`.
+- If you reach the admin API through a hostname other than `localhost`/`127.0.0.1` without `--admin-token`, it now returns `403`. Set an admin token.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added

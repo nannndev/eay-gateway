@@ -167,9 +167,24 @@ impl SseToOpenAi {
                     self.tool_count += 1;
                     out.push(self.tool_frame(idx, ev["content_block"]["id"].as_str(), ev["content_block"]["name"].as_str(), ""));
                 }
+                // Thinking travels as `reasoning_content` plus `thinking_signature`, so a Claude
+                // client can send the signed block back with its tool results.
+                "content_block_start" if ev["content_block"]["type"] == "redacted_thinking" => {
+                    if let Some(data) = ev["content_block"]["data"].as_str() {
+                        out.push(self.base.chunk_data(json!({ "redacted_thinking": data }), None));
+                    }
+                }
                 "content_block_delta" => {
                     let d = &ev["delta"];
-                    if d["type"] == "text_delta" {
+                    if d["type"] == "thinking_delta" {
+                        if let Some(t) = d["thinking"].as_str().filter(|t| !t.is_empty()) {
+                            out.push(self.base.chunk_data(json!({ "reasoning_content": t }), None));
+                        }
+                    } else if d["type"] == "signature_delta" {
+                        if let Some(sig) = d["signature"].as_str().filter(|t| !t.is_empty()) {
+                            out.push(self.base.chunk_data(json!({ "thinking_signature": sig }), None));
+                        }
+                    } else if d["type"] == "text_delta" {
                         if let Some(t) = d["text"].as_str().filter(|t| !t.is_empty()) {
                             out.push(self.base.chunk_data(json!({ "content": t }), None));
                         }
@@ -204,6 +219,9 @@ impl SseToOpenAi {
             let cand = &r["candidates"][0];
             for part in cand["content"]["parts"].as_array().into_iter().flatten() {
                 if part["thought"] == true {
+                    if let Some(t) = part["text"].as_str().filter(|t| !t.is_empty()) {
+                        out.push(self.base.chunk_data(json!({ "reasoning_content": t }), None));
+                    }
                     continue;
                 }
                 if let Some(t) = part["text"].as_str().filter(|t| !t.is_empty()) {
@@ -245,6 +263,9 @@ impl SseToOpenAi {
 pub fn aggregate_sse(sse: &str, usage: (i64, i64)) -> Value {
     let (mut id, mut model, mut created) = (Value::Null, Value::Null, json!(now_secs()));
     let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut signature = String::new();
+    let mut redacted: Vec<Value> = Vec::new();
     let mut finish = Value::Null;
     let mut tools: Vec<Value> = Vec::new();
     for line in sse.lines() {
@@ -258,6 +279,15 @@ pub fn aggregate_sse(sse: &str, usage: (i64, i64)) -> Value {
         let ch = &ev["choices"][0];
         if let Some(t) = ch["delta"]["content"].as_str() {
             content.push_str(t);
+        }
+        if let Some(t) = ch["delta"]["reasoning_content"].as_str() {
+            reasoning.push_str(t);
+        }
+        if let Some(t) = ch["delta"]["thinking_signature"].as_str() {
+            signature.push_str(t);
+        }
+        if let Some(d) = ch["delta"]["redacted_thinking"].as_str() {
+            redacted.push(json!({ "type": "redacted_thinking", "data": d }));
         }
         if !ch["finish_reason"].is_null() {
             finish = ch["finish_reason"].clone();
@@ -282,6 +312,17 @@ pub fn aggregate_sse(sse: &str, usage: (i64, i64)) -> Value {
     let mut message = json!({ "role": "assistant", "content": content });
     if !tools.is_empty() {
         message["tool_calls"] = json!(tools);
+    }
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
+    let mut blocks = Vec::new();
+    if !signature.is_empty() {
+        blocks.push(json!({ "type": "thinking", "thinking": reasoning, "signature": signature }));
+    }
+    blocks.extend(redacted);
+    if !blocks.is_empty() {
+        message["thinking_blocks"] = json!(blocks);
     }
     json!({
         "id": id, "object": "chat.completion", "created": created, "model": model,

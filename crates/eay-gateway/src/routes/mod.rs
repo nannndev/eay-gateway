@@ -6,22 +6,125 @@ use axum::{
     extract::Request,
     http::{header, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use eay_gateway_core::engine::GatewayEngine;
 use serde_json::json;
 
-async fn handle_ui() -> Html<&'static str> {
-    Html(include_str!("../ui.html"))
+/// `/`: the gateway has no UI of its own; point people at the console and the API.
+async fn handle_root() -> Json<serde_json::Value> {
+    Json(json!({
+        "service": "eay-gateway",
+        "version": env!("CARGO_PKG_VERSION"),
+        "console": "https://github.com/nannndev/eay-console",
+        "openai_base_url": "/v1",
+        "health": "/gateway/health",
+    }))
+}
+
+/// Browser origins allowed to call this gateway (`--console-origin`, comma-separated), e.g. the
+/// hosted eay-console. Anything else gets no CORS headers, so other web pages still cannot read
+/// responses or send JSON to admin routes.
+fn allowed_origins() -> Vec<String> {
+    std::env::var("EAY_GATEWAY_CONSOLE_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|o| o.trim().trim_end_matches('/').to_string())
+        .filter(|o| !o.is_empty())
+        .collect()
+}
+
+/// Whether `origin` may call the gateway from a browser. `http://localhost:<port>` and
+/// `http://127.0.0.1:<port>` are always allowed so the console can be run locally.
+fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
+    let local = ["http://localhost:", "http://127.0.0.1:", "http://[::1]:"]
+        .iter()
+        .any(|p| origin.strip_prefix(p).is_some_and(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())));
+    local || allowed.iter().any(|a| a == origin)
+}
+
+/// CORS for the console. Requests without an `Origin` (CLIs, SDKs, desktop apps calling from
+/// native code) pass through untouched. A browser request from an origin that is not allowed is
+/// refused outright, not just left without CORS headers: "simple" cross-site requests (form posts,
+/// multipart audio uploads) would otherwise still run and spend the user's quota. Preflights from
+/// allowed origins are answered here, including Chrome's Private Network Access check, which a
+/// public page needs to call 127.0.0.1.
+async fn cors_middleware(req: Request, next: Next) -> Response {
+    let Some(origin) = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()).map(str::to_string) else {
+        return next.run(req).await;
+    };
+    if !origin_allowed(&origin, &allowed_origins()) {
+        let msg = format!("Origin {origin} is not allowed; start the gateway with --console-origin {origin}");
+        return (StatusCode::FORBIDDEN, Json(json!({ "detail": msg, "error": { "message": msg } }))).into_response();
+    }
+    if req.method() == axum::http::Method::OPTIONS {
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        let h = resp.headers_mut();
+        h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, axum::http::HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"));
+        if let Some(asked) = req.headers().get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
+            h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, asked.clone());
+        }
+        if req.headers().get("access-control-request-private-network").is_some() {
+            h.insert("access-control-allow-private-network", axum::http::HeaderValue::from_static("true"));
+        }
+        h.insert(header::ACCESS_CONTROL_MAX_AGE, axum::http::HeaderValue::from_static("600"));
+        add_cors_origin(h, &origin);
+        return resp;
+    }
+    let mut resp = next.run(req).await;
+    add_cors_origin(resp.headers_mut(), &origin);
+    resp
+}
+
+fn add_cors_origin(h: &mut axum::http::HeaderMap, origin: &str) {
+    if let Ok(v) = axum::http::HeaderValue::from_str(origin) {
+        h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+        h.insert(header::VARY, axum::http::HeaderValue::from_static("Origin"));
+    }
+}
+
+/// Without an admin token, only loopback Host headers may reach admin routes: blocks DNS rebinding
+/// from a browser tab (which could otherwise register a stdio MCP server = arbitrary command).
+pub(crate) fn is_loopback_host(headers: &axum::http::HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return true; // HTTP/1.0 or in-process calls; browsers always send Host
+    };
+    let name = if host.starts_with('[') { host.split(']').next().map(|h| &h[1..]) } else { host.split(':').next() };
+    matches!(name, Some("localhost" | "127.0.0.1" | "::1"))
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[derive(Debug, PartialEq)]
+enum AdminAccess {
+    Allow,
+    ReadOnly,
+    Unauthorized,
+    LoopbackOnly,
+}
+
+/// `full` can do everything; `read` can only GET (dashboards, monitors). With neither set,
+/// admin is loopback-only.
+fn admin_access(full: Option<&str>, read: Option<&str>, provided: Option<&str>, is_get: bool, loopback: bool) -> AdminAccess {
+    if full.is_none() && read.is_none() {
+        return if loopback { AdminAccess::Allow } else { AdminAccess::LoopbackOnly };
+    }
+    let is = |t: Option<&str>| matches!((provided, t), (Some(p), Some(t)) if constant_time_eq(p.as_bytes(), t.as_bytes()));
+    match (is(full), is(read)) {
+        (true, _) => AdminAccess::Allow,
+        (_, true) if is_get => AdminAccess::Allow,
+        (_, true) => AdminAccess::ReadOnly,
+        _ => AdminAccess::Unauthorized,
+    }
 }
 
 async fn admin_auth_middleware(req: Request, next: Next) -> Response {
-    let token = std::env::var("EAY_GATEWAY_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());
-    let Some(expected) = token else {
-        return next.run(req).await;
-    };
+    let env_token = |name: &str| std::env::var(name).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let (full, read) = (env_token("EAY_GATEWAY_ADMIN_TOKEN"), env_token("EAY_GATEWAY_ADMIN_READ_TOKEN"));
     let provided = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -29,19 +132,53 @@ async fn admin_auth_middleware(req: Request, next: Next) -> Response {
         .and_then(|v| v.strip_prefix("Bearer ").or(v.strip_prefix("bearer ")))
         .or_else(|| req.headers().get("x-admin-token").and_then(|v| v.to_str().ok()))
         .map(str::trim);
-    if provided == Some(expected.trim()) {
-        next.run(req).await
-    } else {
-        (StatusCode::UNAUTHORIZED, Json(json!({ "detail": "Admin token required" }))).into_response()
-    }
+    let access =
+        admin_access(full.as_deref(), read.as_deref(), provided, req.method() == axum::http::Method::GET, is_loopback_host(req.headers()));
+    let (status, detail) = match access {
+        AdminAccess::Allow => return next.run(req).await,
+        AdminAccess::ReadOnly => (StatusCode::FORBIDDEN, "This admin token is read-only"),
+        AdminAccess::Unauthorized => (StatusCode::UNAUTHORIZED, "Admin token required"),
+        AdminAccess::LoopbackOnly => (StatusCode::FORBIDDEN, "Admin API is loopback-only; set --admin-token to allow other hosts"),
+    };
+    (status, Json(json!({ "detail": detail }))).into_response()
 }
+
+/// Enforces a virtual key's `max_concurrent`; the slot is released when the response body
+/// (including a long SSE stream) has been fully sent or dropped.
+async fn concurrency_middleware(axum::extract::State(engine): axum::extract::State<GatewayEngine>, req: Request, next: Next) -> Response {
+    let secret = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").or(v.strip_prefix("bearer ")))
+        .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()))
+        .map(str::trim)
+        .filter(|s| s.starts_with(eay_gateway_core::store::KEY_PREFIX));
+    let Some(key) = secret.and_then(|s| engine.store.find_virtual_key(s)).filter(|k| k.max_concurrent.is_some()) else {
+        return next.run(req).await;
+    };
+    let Some(guard) = engine.try_acquire_inflight(&key) else {
+        let msg = format!("Key '{}' already has {} requests in flight", key.name, key.max_concurrent.unwrap_or(0));
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "detail": msg, "error": { "message": msg, "type": "rate_limit" } })))
+            .into_response();
+    };
+    let resp = next.run(req).await;
+    let (parts, body) = resp.into_parts();
+    let stream = futures::StreamExt::map(body.into_data_stream(), move |chunk| {
+        let _ = &guard; // keep the slot until the stream ends
+        chunk
+    });
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
+/// Largest accepted request body: base64 media inflates ~33%, so this fits a 25 MB audio file
+/// or several large images in one chat request.
+pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Builds the Axum router for OpenAI-compatible inference and gateway admin APIs.
 pub fn gateway_router(engine: GatewayEngine) -> Router {
     let public = Router::new()
-        // Embedded Web Console
-        .route("/", get(handle_ui))
-        .route("/ui", get(handle_ui))
+        .route("/", get(handle_root))
         // Core chat completions, Anthropic/Responses native, multimodal passthrough & health
         .route("/v1/chat/completions", post(admin::handle_chat_completions))
         .route("/gateway/v1/chat/completions", post(admin::handle_chat_completions))
@@ -61,7 +198,10 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/v1/audio/translations", post(admin::handle_audio_translations))
         .route("/v1/models", get(admin::handle_list_models_v1))
         .route("/gateway/v1/models", get(admin::handle_list_models_v1))
-        .route("/gateway/health", get(admin::handle_health));
+        .route("/gateway/health", get(admin::handle_health))
+        .layer(middleware::from_fn_with_state(engine.clone(), concurrency_middleware))
+        // axum's 2 MB default rejects long agent contexts, inline images/PDFs and audio uploads.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES));
 
     let admin_routes = Router::new()
         // Accounts (OAuth)
@@ -105,15 +245,21 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/skills/:name/toggle", patch(admin::handle_toggle_skill))
         .route("/gateway/admin/agents", get(admin::handle_list_agents).post(admin::handle_save_agent))
         .route("/gateway/admin/agents/:name", put(admin::handle_put_agent).delete(admin::handle_delete_agent))
-        .route("/gateway/admin/sessions/:id", delete(admin::handle_delete_session))
+        .route("/gateway/admin/sessions", get(admin::handle_list_sessions))
+        .route("/gateway/admin/sessions/:id", get(admin::handle_get_session).delete(admin::handle_delete_session))
         // Live Activity & Subagents
         .route("/gateway/admin/events", get(admin::handle_activity_events))
         .route("/gateway/admin/activity", get(admin::handle_activity_snapshot))
         .route("/gateway/admin/subagents", get(admin::handle_list_subagents).post(admin::handle_spawn_subagent))
         .route("/gateway/admin/subagents/:id", get(admin::handle_get_subagent).delete(admin::handle_delete_subagent))
+        .route("/gateway/admin/subagents/:id/cancel", post(admin::handle_cancel_subagent))
+        .route("/gateway/admin/approvals", get(admin::handle_list_approvals))
+        .route("/gateway/admin/approvals/:id", post(admin::handle_resolve_approval))
         // External MCP Connectors
         .route("/gateway/admin/mcp", get(admin::handle_list_mcp).post(admin::handle_save_mcp))
+        .route("/gateway/admin/mcp/import", post(admin::handle_import_mcp))
         .route("/gateway/admin/mcp/:name", delete(admin::handle_delete_mcp))
+        .route("/gateway/admin/mcp/:name/call", post(admin::handle_mcp_call))
         .route("/gateway/admin/mcp/:name/toggle", patch(admin::handle_toggle_mcp))
         .route("/gateway/admin/mcp/:name/tools", post(admin::handle_mcp_tools))
         // Models, Usage, Stats, Settings
@@ -124,5 +270,36 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/admin/settings", get(admin::handle_get_settings).post(admin::handle_update_settings))
         .layer(middleware::from_fn(admin_auth_middleware));
 
-    public.merge(admin_routes).with_state(engine)
+    // CORS sits outside every other layer so preflights never reach auth or concurrency checks.
+    public.merge(admin_routes).with_state(engine).layer(middleware::from_fn(cors_middleware))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{admin_access, AdminAccess::*};
+
+    #[test]
+    fn only_the_console_and_local_dev_origins_are_allowed() {
+        use super::origin_allowed;
+        let allowed = vec!["https://nannndev.github.io".to_string()];
+        assert!(origin_allowed("https://nannndev.github.io", &allowed));
+        assert!(origin_allowed("http://localhost:5173", &allowed));
+        assert!(origin_allowed("http://127.0.0.1:4173", &allowed));
+        assert!(!origin_allowed("https://evil.example", &allowed));
+        assert!(!origin_allowed("https://nannndev.github.io.evil.example", &allowed));
+        assert!(!origin_allowed("http://localhost.evil.example:80", &allowed));
+        assert!(!origin_allowed("http://localhost:", &allowed));
+        assert!(!origin_allowed("null", &allowed));
+    }
+
+    #[test]
+    fn admin_tokens_grant_full_or_read_only_access() {
+        assert_eq!(admin_access(None, None, None, false, true), Allow);
+        assert_eq!(admin_access(None, None, None, true, false), LoopbackOnly);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("full"), false, false), Allow);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("ro"), true, false), Allow);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("ro"), false, true), ReadOnly);
+        assert_eq!(admin_access(Some("full"), Some("ro"), Some("nope"), true, true), Unauthorized);
+        assert_eq!(admin_access(None, Some("ro"), None, true, true), Unauthorized);
+    }
 }

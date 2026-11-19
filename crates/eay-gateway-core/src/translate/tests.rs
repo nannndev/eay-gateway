@@ -642,3 +642,234 @@ mod responses_native {
         assert_eq!(resp["usage"]["total_tokens"], 6);
     }
 }
+
+mod openai_to_responses_sse {
+    use super::super::OpenAiToResponsesSse;
+    use serde_json::{json, Value};
+
+    fn events(out: &str) -> Vec<Value> {
+        out.lines().filter_map(|l| l.strip_prefix("data: ")).map(|d| serde_json::from_str(d).unwrap()).collect()
+    }
+    fn chunk(v: Value) -> String {
+        format!("data: {v}\n\n")
+    }
+
+    #[test]
+    fn streams_text_as_output_text_deltas_and_completes() {
+        let mut c = OpenAiToResponsesSse::new("auto".into());
+        let mut out = c.feed_sse_chunk(&chunk(json!({"choices":[{"delta":{"content":"Hel"}}]})));
+        out += &c.feed_sse_chunk(&chunk(json!({"choices":[{"delta":{"content":"lo"}}]})));
+        out += &c.feed_sse_chunk(&chunk(json!({"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}})));
+        out += &c.feed_sse_chunk("data: [DONE]\n\n");
+        let ev = events(&out);
+        let types: Vec<&str> = ev.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(types[0], "response.created");
+        assert_eq!(
+            ev.iter().filter(|e| e["type"] == "response.output_text.delta").map(|e| e["delta"].as_str().unwrap()).collect::<String>(),
+            "Hello"
+        );
+        let done = ev.last().unwrap();
+        assert_eq!(done["type"], "response.completed");
+        assert_eq!(done["response"]["output"][0]["content"][0]["text"], "Hello");
+        assert_eq!(done["response"]["usage"]["total_tokens"], 5);
+        // sequence numbers strictly increase
+        assert!(ev.windows(2).all(|w| w[0]["sequence_number"].as_u64() < w[1]["sequence_number"].as_u64()));
+    }
+
+    #[test]
+    fn streams_tool_calls_as_function_call_items() {
+        let mut c = OpenAiToResponsesSse::new("auto".into());
+        let mut out = c.feed_sse_chunk(&chunk(
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}),
+        ));
+        out += &c.feed_sse_chunk(&chunk(
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ));
+        out += &c.finish();
+        let ev = events(&out);
+        let added = ev.iter().find(|e| e["type"] == "response.output_item.added").unwrap();
+        assert_eq!(added["item"]["type"], "function_call");
+        assert_eq!(added["item"]["name"], "shell");
+        let item = &ev.last().unwrap()["response"]["output"][0];
+        assert_eq!(item["call_id"], "call_1");
+        assert_eq!(item["arguments"], "{\"cmd\":\"ls\"}");
+    }
+
+    #[test]
+    fn finishing_twice_emits_completed_once() {
+        let mut c = OpenAiToResponsesSse::new("m".into());
+        let out = c.feed_sse_chunk("data: [DONE]\n\n") + &c.finish();
+        assert_eq!(events(&out).iter().filter(|e| e["type"] == "response.completed").count(), 1);
+    }
+}
+
+mod responses_request_to_openai {
+    use super::super::responses_to_openai;
+    use serde_json::json;
+
+    #[test]
+    fn carries_function_tools_and_drops_builtins() {
+        let out = responses_to_openai(&json!({
+            "model": "auto", "input": "hi", "tool_choice": { "type": "function", "name": "shell" },
+            "tools": [
+                { "type": "function", "name": "shell", "description": "run", "parameters": { "type": "object", "properties": { "cmd": { "type": "string" } } } },
+                { "type": "web_search" }
+            ]
+        }));
+        assert_eq!(out["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(out["tools"][0]["function"]["name"], "shell");
+        assert_eq!(out["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"], "string");
+        assert_eq!(out["tool_choice"]["function"]["name"], "shell");
+    }
+
+    #[test]
+    fn replays_a_tool_round_trip_from_the_input_history() {
+        let out = responses_to_openai(&json!({ "model": "auto", "input": [
+            { "role": "user", "content": "list files" },
+            { "type": "reasoning", "summary": [] },
+            { "type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{\"cmd\":\"ls\"}" },
+            { "type": "function_call", "call_id": "c2", "name": "shell", "arguments": "{\"cmd\":\"pwd\"}" },
+            { "type": "function_call_output", "call_id": "c1", "output": "a.txt" },
+            { "type": "function_call_output", "call_id": "c2", "output": "/tmp" }
+        ]}));
+        let m = out["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 4, "{out}");
+        assert_eq!(m[1]["role"], "assistant");
+        assert_eq!(m[1]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(m[1]["tool_calls"][1]["id"], "c2");
+        assert_eq!(m[2]["role"], "tool");
+        assert_eq!(m[2]["tool_call_id"], "c1");
+    }
+}
+
+mod thinking {
+    use super::super::{
+        aggregate_sse, anthropic_to_openai, budget_to_effort, openai_completion_to_anthropic, openai_to_anthropic, openai_to_codex,
+        openai_to_gemini, responses_to_openai, strip_gateway_fields, OpenAiToAnthropicSse, SseToOpenAi,
+    };
+    use serde_json::{json, Value};
+
+    #[test]
+    fn claude_code_thinking_becomes_an_effort_and_returns_to_claude_unchanged() {
+        let oa = anthropic_to_openai(&json!({
+            "model": "claude-sonnet-5-5", "max_tokens": 8000, "temperature": 0.3,
+            "thinking": { "type": "enabled", "budget_tokens": 31999 },
+            "messages": [{ "role": "user", "content": "hi" }]
+        }));
+        assert_eq!(oa["reasoning_effort"], "high");
+        let back = openai_to_anthropic(&oa, "claude-sonnet-5-5");
+        assert_eq!(back["thinking"], json!({ "type": "enabled", "budget_tokens": 31999 }));
+        assert!(back["max_tokens"].as_u64().unwrap() > 31999, "max_tokens must exceed the budget");
+        assert!(back.get("temperature").is_none(), "temperature is not allowed with thinking");
+    }
+
+    #[test]
+    fn an_openai_effort_turns_on_claude_thinking() {
+        let out = openai_to_anthropic(&json!({ "reasoning_effort": "low", "messages": [{ "role": "user", "content": "x" }] }), "m");
+        assert_eq!(out["thinking"]["budget_tokens"], 4096);
+        assert!(openai_to_anthropic(&json!({ "messages": [] }), "m").get("thinking").is_none());
+        assert_eq!(budget_to_effort(1024), "minimal");
+    }
+
+    #[test]
+    fn signed_thinking_blocks_survive_a_tool_round_trip() {
+        let sig_block = json!({ "type": "thinking", "thinking": "plan", "signature": "SIG" });
+        let oa = anthropic_to_openai(&json!({ "messages": [
+            { "role": "user", "content": "go" },
+            { "role": "assistant", "content": [sig_block, { "type": "redacted_thinking", "data": "R" },
+                { "type": "tool_use", "id": "t1", "name": "ls", "input": {} }] },
+            { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "a.txt" }] }
+        ]}));
+        let back = openai_to_anthropic(&oa, "m");
+        let blocks = back["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0], sig_block, "thinking must come first and unchanged");
+        assert_eq!(blocks[1]["type"], "redacted_thinking");
+        assert_eq!(blocks[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn claude_thinking_stream_reaches_openai_clients_and_folds_into_a_reply() {
+        let mut tr = SseToOpenAi::new("claude", "m".into());
+        let mut frames = String::new();
+        for ev in [
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "Let me think" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "SIG" } }),
+            json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "Answer" } }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 5 } }),
+        ] {
+            frames.push_str(&tr.feed(&ev).unwrap().concat());
+        }
+        let reply = aggregate_sse(&frames, (0, 0));
+        let msg = &reply["choices"][0]["message"];
+        assert_eq!(msg["content"], "Answer");
+        assert_eq!(msg["reasoning_content"], "Let me think");
+        assert_eq!(msg["thinking_blocks"][0], json!({ "type": "thinking", "thinking": "Let me think", "signature": "SIG" }));
+        // And back to an Anthropic client as a real thinking block.
+        let ant = openai_completion_to_anthropic(&reply, "m");
+        assert_eq!(ant["content"][0]["type"], "thinking");
+        assert_eq!(ant["content"][1]["text"], "Answer");
+    }
+
+    #[test]
+    fn anthropic_stream_has_one_index_per_block_in_order() {
+        let mut enc = OpenAiToAnthropicSse::new("m".into());
+        let chunk = |d: Value, f: Option<&str>| format!("data: {}\n\n", json!({ "choices": [{ "delta": d, "finish_reason": f }] }));
+        let mut out = enc.feed_sse_chunk(&chunk(json!({ "reasoning_content": "hmm" }), None));
+        out += &enc.feed_sse_chunk(&chunk(json!({ "thinking_signature": "SIG" }), None));
+        out += &enc.feed_sse_chunk(&chunk(json!({ "content": "ok" }), None));
+        out += &enc.feed_sse_chunk(&chunk(
+            json!({ "tool_calls": [{ "index": 0, "id": "t", "function": { "name": "ls", "arguments": "{}" } }] }),
+            Some("tool_calls"),
+        ));
+        let ev: Vec<Value> = out.lines().filter_map(|l| l.strip_prefix("data: ")).map(|d| serde_json::from_str(d).unwrap()).collect();
+        let starts: Vec<(u64, &str)> = ev
+            .iter()
+            .filter(|e| e["type"] == "content_block_start")
+            .map(|e| (e["index"].as_u64().unwrap(), e["content_block"]["type"].as_str().unwrap()))
+            .collect();
+        assert_eq!(starts, [(0, "thinking"), (1, "text"), (2, "tool_use")]);
+        let text_delta = ev.iter().find(|e| e["delta"]["type"] == "text_delta").unwrap();
+        assert_eq!(text_delta["index"], 1, "text deltas must use the text block's own index");
+        let sig = ev.iter().find(|e| e["delta"]["type"] == "signature_delta").unwrap();
+        assert_eq!(sig["index"], 0);
+        assert_eq!(ev.iter().filter(|e| e["type"] == "content_block_stop").count(), 3);
+    }
+
+    #[test]
+    fn codex_and_gemini_get_the_effort_and_codex_cli_effort_is_kept() {
+        let req = json!({ "reasoning_effort": "high", "messages": [{ "role": "user", "content": "x" }] });
+        assert_eq!(openai_to_codex(&req, "gpt")["reasoning"]["effort"], "high");
+        let g = openai_to_gemini(&req, "gemini", None);
+        let cfg = &g["request"]["generationConfig"]["thinkingConfig"];
+        assert_eq!(cfg["includeThoughts"], true);
+        assert!(cfg["thinkingBudget"].as_u64().unwrap() > 0);
+        let from_codex_cli = responses_to_openai(&json!({ "model": "auto", "input": "x", "reasoning": { "effort": "medium" } }));
+        assert_eq!(from_codex_cli["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn gemini_thoughts_become_reasoning_not_answer_text() {
+        let mut tr = SseToOpenAi::new("gemini", "m".into());
+        let out = tr
+            .feed(
+                &json!({ "candidates": [{ "content": { "parts": [{ "text": "thinking...", "thought": true }, { "text": "answer" }] } }] }),
+            )
+            .unwrap()
+            .concat();
+        let reply = aggregate_sse(&out, (0, 0));
+        assert_eq!(reply["choices"][0]["message"]["content"], "answer");
+        assert_eq!(reply["choices"][0]["message"]["reasoning_content"], "thinking...");
+    }
+
+    #[test]
+    fn gateway_only_fields_are_removed_for_plain_openai_upstreams() {
+        let mut b = json!({ "thinking_budget_tokens": 1, "reasoning_effort": "low",
+            "messages": [{ "role": "assistant", "content": "x", "thinking_blocks": [], "reasoning_content": "r" }] });
+        strip_gateway_fields(&mut b);
+        assert!(b.get("thinking_budget_tokens").is_none());
+        assert_eq!(b["reasoning_effort"], "low");
+        assert!(b["messages"][0].get("thinking_blocks").is_none());
+        assert_eq!(b["messages"][0]["reasoning_content"], "r", "client fields like DeepSeek's are kept");
+    }
+}

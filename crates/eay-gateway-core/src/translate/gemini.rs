@@ -125,6 +125,10 @@ pub fn openai_to_gemini(body: &Value, model: &str, project: Option<&str>) -> Val
     if let Some(t) = body.get("temperature") {
         request["generationConfig"]["temperature"] = t.clone();
     }
+    if let Some(effort) = super::reasoning_effort(body) {
+        let budget = body["thinking_budget_tokens"].as_u64().unwrap_or_else(|| super::effort_to_budget(effort));
+        request["generationConfig"]["thinkingConfig"] = json!({ "thinkingBudget": budget.min(24_576), "includeThoughts": true });
+    }
     let decls: Vec<Value> = body
         .get("tools")
         .and_then(|t| t.as_array())

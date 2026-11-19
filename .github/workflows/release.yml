@@ -58,3 +58,71 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+
+  docker:
+    name: Container image (ghcr.io)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: macos-universal
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for tap token
+        id: tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: if [ -n "$TAP_TOKEN" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "HOMEBREW_TAP_TOKEN not set; skipping"; fi
+      - uses: actions/checkout@v4
+        if: steps.tap.outputs.ok == 'true'
+      - name: Render formula and push to nannndev/homebrew-tap
+        if: steps.tap.outputs.ok == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS.txt
+          sum() { awk -v f="$1" '$2 == f { print $1 }' SHA256SUMS.txt; }
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/nannndev/homebrew-tap.git" tap
+          sed -e "s/@VERSION@/${version}/g" \
+              -e "s/@SHA_MAC_ARM@/$(sum eay-gateway-aarch64-apple-darwin)/" \
+              -e "s/@SHA_MAC_X86@/$(sum eay-gateway-x86_64-apple-darwin)/" \
+              -e "s/@SHA_LINUX_X86@/$(sum eay-gateway-x86_64-unknown-linux-gnu)/" \
+              packaging/homebrew/eay-gateway.rb > tap/Formula/eay-gateway.rb
+          if grep -qE '@[A-Z_]+@|sha256 ""' tap/Formula/eay-gateway.rb; then echo "formula has unfilled values"; exit 1; fi
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/eay-gateway.rb
+          git commit -m "eay-gateway ${version}" || exit 0
+          git push

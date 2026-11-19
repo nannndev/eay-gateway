@@ -27,7 +27,8 @@ pub fn openai_to_anthropic(body: &Value, model: &str) -> Value {
                     }]
                 }));
             } else if role == "assistant" {
-                let mut blocks = Vec::new();
+                // Signed thinking from an earlier Claude turn must come first, unchanged.
+                let mut blocks: Vec<Value> = m["thinking_blocks"].as_array().cloned().unwrap_or_default();
                 let txt = extract_text(m.get("content").unwrap_or(&Value::Null));
                 if !txt.is_empty() {
                     blocks.push(json!({ "type": "text", "text": txt }));
@@ -55,7 +56,13 @@ pub fn openai_to_anthropic(body: &Value, model: &str) -> Value {
         }
     }
 
-    let max_tokens = body.get("max_tokens").or_else(|| body.get("max_completion_tokens")).and_then(|v| v.as_u64()).unwrap_or(8192);
+    let mut max_tokens = body.get("max_tokens").or_else(|| body.get("max_completion_tokens")).and_then(|v| v.as_u64()).unwrap_or(8192);
+    let thinking_budget = super::reasoning_effort(body)
+        .map(|e| body["thinking_budget_tokens"].as_u64().unwrap_or_else(|| super::effort_to_budget(e)).max(1024));
+    if let Some(b) = thinking_budget {
+        // Anthropic requires max_tokens > budget_tokens.
+        max_tokens = max_tokens.max(b + 4096);
+    }
 
     let mut out = json!({
         "model": model,
@@ -66,7 +73,10 @@ pub fn openai_to_anthropic(body: &Value, model: &str) -> Value {
     if !system_parts.is_empty() {
         out["system"] = json!(system_parts.join("\n\n"));
     }
-    if let Some(temp) = body.get("temperature") {
+    if let Some(b) = thinking_budget {
+        out["thinking"] = json!({ "type": "enabled", "budget_tokens": b });
+    } else if let Some(temp) = body.get("temperature") {
+        // Anthropic rejects a custom temperature while thinking is on.
         out["temperature"] = temp.clone();
     }
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
@@ -176,9 +186,12 @@ pub fn anthropic_to_openai(body: &Value) -> Value {
             Value::Array(blocks) if role == "assistant" => {
                 let mut text = String::new();
                 let mut tool_calls = Vec::new();
+                let mut thinking: Vec<Value> = Vec::new();
                 for b in blocks {
                     match b["type"].as_str().unwrap_or("") {
                         "text" => text.push_str(b["text"].as_str().unwrap_or("")),
+                        // Claude must get its signed thinking back with the tool calls it made.
+                        "thinking" | "redacted_thinking" => thinking.push(b.clone()),
                         "tool_use" => {
                             let args = serde_json::to_string(&b["input"]).unwrap_or_else(|_| "{}".into());
                             tool_calls.push(json!({
@@ -193,6 +206,9 @@ pub fn anthropic_to_openai(body: &Value) -> Value {
                 let mut msg = json!({ "role": "assistant", "content": text });
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = Value::Array(tool_calls);
+                }
+                if !thinking.is_empty() {
+                    msg["thinking_blocks"] = Value::Array(thinking);
                 }
                 messages.push(msg);
             }
@@ -265,6 +281,17 @@ pub fn anthropic_to_openai(body: &Value) -> Value {
     if let Some(t) = body.get("temperature") {
         out["temperature"] = t.clone();
     }
+    // Claude Code's "think" / "think hard" / "ultrathink" become a reasoning effort every upstream
+    // understands; the exact budget rides along so a Claude upstream gets it back unchanged.
+    match body["thinking"]["type"].as_str() {
+        Some("enabled") => {
+            let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(10_000);
+            out["reasoning_effort"] = json!(super::budget_to_effort(budget));
+            out["thinking_budget_tokens"] = json!(budget);
+        }
+        Some("adaptive") => out["reasoning_effort"] = json!("medium"),
+        _ => {}
+    }
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
         let oa_tools: Vec<Value> = tools
             .iter()
@@ -292,7 +319,15 @@ pub fn anthropic_to_openai(body: &Value) -> Value {
 pub fn openai_completion_to_anthropic(resp: &Value, requested_model: &str) -> Value {
     let choice = &resp["choices"][0];
     let msg = &choice["message"];
-    let mut content = Vec::new();
+    let mut content: Vec<Value> = match msg["thinking_blocks"].as_array() {
+        Some(blocks) => blocks.clone(),
+        // Reasoning from a non-Claude upstream has no signature; show it as unsigned thinking.
+        None => msg["reasoning_content"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|t| vec![json!({ "type": "thinking", "thinking": t, "signature": "" })])
+            .unwrap_or_default(),
+    };
     if let Some(txt) = msg["content"].as_str().filter(|s| !s.is_empty()) {
         content.push(json!({ "type": "text", "text": txt }));
     }
@@ -326,11 +361,14 @@ pub fn openai_completion_to_anthropic(resp: &Value, requested_model: &str) -> Va
 }
 
 /// Stateful converter from OpenAI `chat.completion.chunk` SSE lines to Anthropic SSE events.
+/// Blocks are emitted in order (thinking, text, tool_use), each with its own index.
 pub struct OpenAiToAnthropicSse {
     msg_id: String,
     model: String,
     started: bool,
-    text_block_open: bool,
+    /// Index of the open thinking or text block, if one is open.
+    thinking_block: Option<usize>,
+    text_block: Option<usize>,
     next_index: usize,
     tool_blocks: std::collections::HashMap<usize, usize>,
     finished: bool,
@@ -342,7 +380,8 @@ impl OpenAiToAnthropicSse {
             msg_id: format!("msg_{}", Uuid::new_v4().simple()),
             model,
             started: false,
-            text_block_open: false,
+            thinking_block: None,
+            text_block: None,
             next_index: 0,
             tool_blocks: std::collections::HashMap::new(),
             finished: false,
@@ -370,6 +409,23 @@ impl OpenAiToAnthropicSse {
         }
     }
 
+    fn open_block(&mut self, out: &mut String, block: Value) -> usize {
+        let idx = self.next_index;
+        self.next_index += 1;
+        out.push_str(&Self::event("content_block_start", json!({ "type": "content_block_start", "index": idx, "content_block": block })));
+        idx
+    }
+
+    fn close(out: &mut String, slot: &mut Option<usize>) {
+        if let Some(idx) = slot.take() {
+            out.push_str(&Self::event("content_block_stop", json!({ "type": "content_block_stop", "index": idx })));
+        }
+    }
+
+    fn delta(out: &mut String, idx: usize, delta: Value) {
+        out.push_str(&Self::event("content_block_delta", json!({ "type": "content_block_delta", "index": idx, "delta": delta })));
+    }
+
     pub fn feed_sse_chunk(&mut self, chunk_str: &str) -> String {
         let mut out = String::new();
         for line in chunk_str.lines() {
@@ -385,62 +441,65 @@ impl OpenAiToAnthropicSse {
                 continue;
             }
             self.ensure_started(&mut out);
-            let ch = &ev["choices"][0];
-            if let Some(txt) = ch["delta"]["content"].as_str().filter(|s| !s.is_empty()) {
-                if !self.text_block_open {
-                    self.text_block_open = true;
-                    let idx = self.next_index;
-                    self.next_index += 1;
-                    out.push_str(&Self::event(
-                        "content_block_start",
-                        json!({ "type": "content_block_start", "index": idx, "content_block": { "type": "text", "text": "" } }),
-                    ));
-                }
-                out.push_str(&Self::event(
-                    "content_block_delta",
-                    json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": txt } }),
-                ));
+            let d = &ev["choices"][0]["delta"];
+            if let Some(data) = d["redacted_thinking"].as_str() {
+                Self::close(&mut out, &mut self.thinking_block);
+                let idx = self.open_block(&mut out, json!({ "type": "redacted_thinking", "data": data }));
+                Self::close(&mut out, &mut Some(idx));
             }
-            for tc in ch["delta"]["tool_calls"].as_array().into_iter().flatten() {
+            if let Some(t) = d["reasoning_content"].as_str().filter(|s| !s.is_empty()) {
+                let idx = match self.thinking_block {
+                    Some(i) => i,
+                    None => {
+                        let i = self.open_block(&mut out, json!({ "type": "thinking", "thinking": "" }));
+                        self.thinking_block = Some(i);
+                        i
+                    }
+                };
+                Self::delta(&mut out, idx, json!({ "type": "thinking_delta", "thinking": t }));
+            }
+            if let Some(sig) = d["thinking_signature"].as_str().filter(|s| !s.is_empty()) {
+                if let Some(idx) = self.thinking_block {
+                    Self::delta(&mut out, idx, json!({ "type": "signature_delta", "signature": sig }));
+                }
+            }
+            if let Some(txt) = d["content"].as_str().filter(|s| !s.is_empty()) {
+                Self::close(&mut out, &mut self.thinking_block);
+                let idx = match self.text_block {
+                    Some(i) => i,
+                    None => {
+                        let i = self.open_block(&mut out, json!({ "type": "text", "text": "" }));
+                        self.text_block = Some(i);
+                        i
+                    }
+                };
+                Self::delta(&mut out, idx, json!({ "type": "text_delta", "text": txt }));
+            }
+            for tc in d["tool_calls"].as_array().into_iter().flatten() {
                 let tc_idx = tc["index"].as_u64().unwrap_or(0) as usize;
                 let block_idx = match self.tool_blocks.get(&tc_idx) {
                     Some(&b) => b,
                     None => {
-                        if self.text_block_open {
-                            out.push_str(&Self::event("content_block_stop", json!({ "type": "content_block_stop", "index": 0 })));
-                            self.text_block_open = false;
-                        }
-                        let b = self.next_index;
-                        self.next_index += 1;
-                        self.tool_blocks.insert(tc_idx, b);
-                        out.push_str(&Self::event(
-                            "content_block_start",
+                        Self::close(&mut out, &mut self.thinking_block);
+                        Self::close(&mut out, &mut self.text_block);
+                        let b = self.open_block(
+                            &mut out,
                             json!({
-                                "type": "content_block_start",
-                                "index": b,
-                                "content_block": {
-                                    "type": "tool_use",
-                                    "id": tc["id"].as_str().unwrap_or(""),
-                                    "name": tc["function"]["name"].as_str().unwrap_or(""),
-                                    "input": {}
-                                }
+                                "type": "tool_use",
+                                "id": tc["id"].as_str().unwrap_or(""),
+                                "name": tc["function"]["name"].as_str().unwrap_or(""),
+                                "input": {}
                             }),
-                        ));
+                        );
+                        self.tool_blocks.insert(tc_idx, b);
                         b
                     }
                 };
                 if let Some(args) = tc["function"]["arguments"].as_str().filter(|s| !s.is_empty()) {
-                    out.push_str(&Self::event(
-                        "content_block_delta",
-                        json!({
-                            "type": "content_block_delta",
-                            "index": block_idx,
-                            "delta": { "type": "input_json_delta", "partial_json": args }
-                        }),
-                    ));
+                    Self::delta(&mut out, block_idx, json!({ "type": "input_json_delta", "partial_json": args }));
                 }
             }
-            if let Some(fr) = ch["finish_reason"].as_str() {
+            if let Some(fr) = ev["choices"][0]["finish_reason"].as_str() {
                 let reason = match fr {
                     "tool_calls" => "tool_use",
                     "length" => "max_tokens",
@@ -458,11 +517,11 @@ impl OpenAiToAnthropicSse {
         }
         self.finished = true;
         self.ensure_started(out);
-        if self.text_block_open {
-            out.push_str(&Self::event("content_block_stop", json!({ "type": "content_block_stop", "index": 0 })));
-            self.text_block_open = false;
-        }
-        for &b in self.tool_blocks.values() {
+        Self::close(out, &mut self.thinking_block);
+        Self::close(out, &mut self.text_block);
+        let mut tools: Vec<usize> = self.tool_blocks.values().copied().collect();
+        tools.sort_unstable();
+        for b in tools {
             out.push_str(&Self::event("content_block_stop", json!({ "type": "content_block_stop", "index": b })));
         }
         out.push_str(&Self::event(

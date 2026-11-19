@@ -1,3 +1,5 @@
+mod service;
+
 use axum::{routing::get, Json};
 use eay_gateway::core::{GatewayEngine, GatewayStore};
 use eay_gateway::gateway_router;
@@ -78,7 +80,7 @@ fn parse_args() -> Result<Config, String> {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "eay-gateway {}\n\nUSAGE:\n  eay-gateway [OPTIONS]\n\nOPTIONS:\n  --host <HOST>          Bind host (default: 127.0.0.1, env: EAY_GATEWAY_HOST)\n  --port <PORT>          Bind port (default: 20129, env: EAY_GATEWAY_PORT)\n  --data-dir <PATH>      Data directory (default: ~/.eay-gateway, env: EAY_GATEWAY_DATA_DIR)\n  --idle-exit <MIN>      Exit after MIN minutes without requests (for apps that share one gateway)\n  -h, --help             Print help",
+                    "eay-gateway {}\n\nUSAGE:\n  eay-gateway [OPTIONS]\n\nOPTIONS:\n  --host <HOST>          Bind host (default: 127.0.0.1, env: EAY_GATEWAY_HOST)\n  --port <PORT>          Bind port (default: 20129, env: EAY_GATEWAY_PORT)\n  --data-dir <PATH>      Data directory (default: ~/.eay-gateway, env: EAY_GATEWAY_DATA_DIR)\n  --admin-token <T>      Full admin access token (env: EAY_GATEWAY_ADMIN_TOKEN)\n  --admin-read-token <T> Read-only (GET) admin token (env: EAY_GATEWAY_ADMIN_READ_TOKEN)\n  --console-origin <O>   Browser origin(s) allowed to call the gateway, comma-separated, e.g. the hosted\n                         eay-console (env: EAY_GATEWAY_CONSOLE_ORIGINS). http://localhost:<port> is always allowed\n  --idle-exit <MIN>      Exit after MIN minutes without requests (for apps that share one gateway)\n  -V, --version          Print version\n  -h, --help             Print help\n\nCOMMANDS:\n  service install [OPTIONS]  Start at login with these options (service uninstall | status)",
                     env!("CARGO_PKG_VERSION")
                 );
                 std::process::exit(0);
@@ -97,6 +99,14 @@ fn parse_args() -> Result<Config, String> {
             "--admin-token" => {
                 let val = args.next().ok_or("--admin-token requires a value")?;
                 std::env::set_var("EAY_GATEWAY_ADMIN_TOKEN", val);
+            }
+            "--admin-read-token" => {
+                let val = args.next().ok_or("--admin-read-token requires a value")?;
+                std::env::set_var("EAY_GATEWAY_ADMIN_READ_TOKEN", val);
+            }
+            "--console-origin" => {
+                let val = args.next().ok_or("--console-origin requires an origin, e.g. https://nannndev.github.io")?;
+                std::env::set_var("EAY_GATEWAY_CONSOLE_ORIGINS", val);
             }
             "--idle-exit" => {
                 let val = args.next().ok_or("--idle-exit requires minutes")?;
@@ -155,6 +165,14 @@ async fn idle_timeout(last_request: std::sync::Arc<std::sync::Mutex<std::time::I
 
 #[tokio::main]
 async fn main() {
+    let argv: Vec<String> = env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("service") {
+        std::process::exit(service::run(&argv[1..]));
+    }
+    if matches!(argv.first().map(String::as_str), Some("-V" | "--version")) {
+        println!("eay-gateway {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let cfg = match parse_args() {
         Ok(c) => c,
         Err(e) => {
@@ -190,6 +208,7 @@ async fn main() {
     };
 
     let engine = GatewayEngine::new(store);
+    engine.restore_subagent_history();
     {
         // Keep provider model lists fresh: check hourly, refetch lists older than a day.
         let engine = engine.clone();

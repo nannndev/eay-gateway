@@ -31,13 +31,13 @@ features:
     details: Inspect remaining percentages, quota reset windows, active subscription tiers, and estimated cost per account through the admin API.
   - icon: ⚡
     title: Multi-Protocol & Multimodal
-    details: Speaks /v1/chat/completions, /v1/messages (Anthropic native), /v1/responses, /v1/embeddings, images, and audio. Translates images, PDFs, video, and auto-decodes code/text files.
+    details: Speaks /v1/chat/completions, /v1/messages (Anthropic native), /v1/responses, /v1/embeddings, images, and audio. Translates images, PDFs, video and thinking settings for every provider.
   - icon: ⛨
     title: Budgets, Guardrails & Encryption
     details: AES-256-GCM encrypted credentials, virtual keys with token/USD budgets, optional secret redaction, context trimming, and --admin-token protection.
   - icon: ◫
-    title: Embedded Web Console & Subagents
-    details: Ships with a built-in Deep Dark Monochrome console (/ui), Agent/Skill presets (SKILL.md upload), session memory, and real-time subagent activity SSE.
+    title: Agents That Delegate
+    details: Agent profiles with skills and tool policies, session memory, and subagents the model can start itself. Tools that change things can wait for your approval in eay-console.
 ---
 
 <div class="custom-section">
@@ -160,14 +160,14 @@ Client (Cursor, Claude, IDE)
 <div class="roadmap-grid">
   <div class="roadmap-card">
     <span class="tag tag-ready">Current Core</span>
-    <h3>Daemon &amp; Embedded Web Console</h3>
-    <p>Single Rust binary with AES-256 store, /v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings, multimodal routing, and built-in /ui console.</p>
+    <h3>Headless Daemon</h3>
+    <p>Single Rust binary with AES-256 store, /v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings, multimodal routing, and an admin API. The web console is a separate app (eay-console).</p>
   </div>
 
   <div class="roadmap-card">
     <span class="tag tag-ready">Current Core</span>
-    <h3>Skills, Agents &amp; Live Activity</h3>
-    <p>Reusable SKILL.md presets, Agent personalities (agent/&lt;name&gt;), session memory, subagent runner, and real-time SSE activity phases.</p>
+    <h3>Agents, Delegation &amp; Approval</h3>
+    <p>Agent profiles (agent/&lt;name&gt;) with skills and tool policies, session memory, subagents the model can start itself, manual approval for tools, and real-time SSE activity.</p>
   </div>
 
   <div class="roadmap-card">
@@ -177,9 +177,9 @@ Client (Cursor, Claude, IDE)
   </div>
 
   <div class="roadmap-card">
-    <span class="tag tag-upcoming">Future Direction</span>
-    <h3>Local LLM Bridging</h3>
-    <p>Seamlessly blend local runtimes (Ollama, vLLM, llama.cpp) as zero-cost fallback tiers when cloud quotas are exhausted.</p>
+    <span class="tag tag-ready">Current Core</span>
+    <h3>Local Models</h3>
+    <p>Ollama, and any OpenAI-compatible local server (vLLM, llama.cpp, LM Studio) through the custom provider, sit in the same routing and combos as cloud accounts.</p>
   </div>
 </div>
 

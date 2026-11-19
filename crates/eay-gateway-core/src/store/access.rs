@@ -39,7 +39,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd FROM keys ORDER BY created_at DESC",
+            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd, max_concurrent, tool_policy FROM keys ORDER BY created_at DESC",
             [],
             |r| {
                 let allowed_providers_json: Option<String> = r.get(4)?;
@@ -56,6 +56,8 @@ impl GatewayStore {
                     max_tokens_budget: r.get(12)?,
                     max_cost_usd: r.get(13)?,
                     default_skills,
+                    max_concurrent: r.get(14)?,
+                    tool_policy: r.get::<_, Option<String>>(15)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
                     created_at: r.get(6)?,
                     last_used_at: r.get(7)?,
                     total_requests: r.get(8)?,
@@ -100,6 +102,8 @@ impl GatewayStore {
             max_tokens_budget: None,
             max_cost_usd: None,
             default_skills: None,
+            max_concurrent: None,
+            tool_policy: Default::default(),
             created_at,
             last_used_at: None,
             total_requests: 0,
@@ -116,6 +120,21 @@ impl GatewayStore {
             params![max_tokens_budget, max_cost_usd, id],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_virtual_key_tool_policy(&self, id: &str, policy: &crate::mcp::ToolPolicy) -> Result<(), String> {
+        policy.validate()?;
+        let json = if policy.is_empty() { None } else { Some(serde_json::to_string(policy).map_err(|e| e.to_string())?) };
+        let conn = self.conn.lock();
+        conn.execute("UPDATE keys SET tool_policy = ?1 WHERE id = ?2", params![json, id]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_virtual_key_concurrency(&self, id: &str, max_concurrent: Option<i64>) -> Result<(), String> {
+        let conn = self.conn.lock();
+        conn.execute("UPDATE keys SET max_concurrent = ?1 WHERE id = ?2", params![max_concurrent.filter(|n| *n > 0), id])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -238,7 +257,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at FROM agents ORDER BY name ASC",
+            "SELECT name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy FROM agents ORDER BY name ASC",
             [],
             |r| {
                 let skills_json: String = r.get(3)?;
@@ -252,6 +271,7 @@ impl GatewayStore {
                     personality: r.get(4)?,
                     temperature: r.get(5)?,
                     max_tokens: max_tokens.and_then(|v| u64::try_from(v).ok()),
+                    tool_policy: r.get::<_, Option<String>>(9)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
                     enabled: r.get::<_, i64>(7)? != 0,
                     updated_at: r.get(8)?,
                 })
@@ -273,8 +293,11 @@ impl GatewayStore {
         personality: &str,
         temperature: Option<f64>,
         max_tokens: Option<u64>,
+        tool_policy: &crate::mcp::ToolPolicy,
         enabled: bool,
     ) -> Result<AgentProfile, String> {
+        tool_policy.validate()?;
+        let policy_json = if tool_policy.is_empty() { None } else { Some(serde_json::to_string(tool_policy).map_err(|e| e.to_string())?) };
         let name = name.trim();
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err("Agent name must be non-empty and use only letters, digits, '-' or '_'".into());
@@ -284,7 +307,7 @@ impl GatewayStore {
         let updated_at = now();
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO agents (name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO agents (name, description, model, skills, personality, temperature, max_tokens, enabled, updated_at, tool_policy) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 name,
                 description.trim(),
@@ -295,6 +318,7 @@ impl GatewayStore {
                 max_tokens.map(|v| v as i64),
                 i64::from(enabled),
                 updated_at,
+                policy_json,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -306,6 +330,7 @@ impl GatewayStore {
             personality: personality.trim().to_string(),
             temperature,
             max_tokens,
+            tool_policy: tool_policy.clone(),
             enabled,
             updated_at,
         })
@@ -334,10 +359,67 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Sessions, newest first: storage id, message count and last update. Message bodies are not
+    /// loaded, so listing stays cheap however long the conversations are.
+    pub fn list_sessions(&self, limit: usize) -> Vec<Value> {
+        let conn = self.conn.lock();
+        query_rows(
+            &conn,
+            "SELECT id, json_array_length(messages), updated_at FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+            params![limit as i64],
+            |r| {
+                let id: String = r.get(0)?;
+                // `key:<key-id>:<sid>` or `local:<sid>`; older ids have no prefix.
+                let (owner, name) = match id.split_once(':') {
+                    Some(("local", rest)) => ("local".to_string(), rest.to_string()),
+                    Some(("key", rest)) => match rest.split_once(':') {
+                        Some((k, s)) => (format!("key:{k}"), s.to_string()),
+                        None => ("unknown".to_string(), rest.to_string()),
+                    },
+                    _ => ("legacy".to_string(), id.clone()),
+                };
+                Ok(serde_json::json!({
+                    "id": id, "session": name, "owner": owner,
+                    "messages": r.get::<_, i64>(1)?, "updated_at": r.get::<_, f64>(2)?,
+                }))
+            },
+        )
+    }
+
+    pub fn session_updated_at(&self, id: &str) -> Option<f64> {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT updated_at FROM sessions WHERE id = ?1", params![id], |r| r.get(0)).ok()
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<bool, String> {
         let conn = self.conn.lock();
         let rows = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
         Ok(rows > 0)
+    }
+
+    // ---- Subagent run history ------------------------------------------
+    /// Keeps the newest 500 finished runs; enough history without unbounded growth.
+    pub fn save_subagent_run(&self, run: &crate::engine::SubagentRun) {
+        let Ok(data) = serde_json::to_string(run) else { return };
+        let conn = self.conn.lock();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO subagent_runs (id, data, updated_at) VALUES (?1, ?2, ?3)",
+            params![run.id, data, run.updated_at],
+        );
+        let _ =
+            conn.execute("DELETE FROM subagent_runs WHERE id NOT IN (SELECT id FROM subagent_runs ORDER BY updated_at DESC LIMIT 500)", []);
+    }
+
+    pub fn list_subagent_runs(&self, limit: usize) -> Vec<crate::engine::SubagentRun> {
+        let conn = self.conn.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT data FROM subagent_runs ORDER BY updated_at DESC LIMIT ?1") else { return Vec::new() };
+        stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))
+            .map(|rows| rows.filter_map(Result::ok).filter_map(|d| serde_json::from_str(&d).ok()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn delete_subagent_run(&self, id: &str) {
+        let _ = self.conn.lock().execute("DELETE FROM subagent_runs WHERE id = ?1", params![id]);
     }
 
     // ---- External MCP Servers --------------------------------------

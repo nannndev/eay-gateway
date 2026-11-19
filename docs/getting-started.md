@@ -2,6 +2,13 @@
 
 ## Install
 
+**Homebrew** (macOS, Linux x64):
+
+```sh
+brew install nannndev/tap/eay-gateway
+brew services start eay-gateway     # start now and at login
+```
+
 **Prebuilt binary:** download `eay-gateway-<platform>` from the
 [releases page](https://github.com/nannndev/eay-gateway/releases) and check it against `SHA256SUMS.txt`.
 
@@ -19,8 +26,21 @@ cargo build --release --bin eay-gateway
 ./target/release/eay-gateway
 ```
 
-It prints `eay-gateway v0.1.0 listening on http://127.0.0.1:20129 (data: ~/.eay-gateway)`.
+It prints `eay-gateway v0.3.0 listening on http://127.0.0.1:20129 (data: ~/.eay-gateway)`.
 Check it with `curl http://127.0.0.1:20129/health`.
+
+### Start at login
+
+```sh
+eay-gateway service install            # add gateway options after `install` if you need them
+eay-gateway service status
+eay-gateway service uninstall
+```
+
+This is per user and needs no admin rights: a LaunchAgent on macOS (log in
+`~/Library/Logs/eay-gateway.log`), a systemd user unit on Linux (`journalctl --user -u eay-gateway`),
+and a scheduled task at logon on Windows. Running `install` again replaces the old setup. With
+Homebrew, use `brew services` instead.
 
 ## Connect an API key
 
@@ -58,7 +78,41 @@ curl -X POST http://127.0.0.1:20129/gateway/admin/accounts/claude/start -H 'cont
 Some logins can be imported from a tool already signed in on this machine: the Codex CLI,
 the Kiro IDE, the Command Code CLI and MiMo Desktop. See [Providers](providers.md).
 
+## On a server, NAS or Raspberry Pi (Docker)
+
+On your own computer, use Homebrew or the binary above. Docker fits a gateway that runs on a home
+server, NAS or VPS and is shared by your machines or a team. It is also the way to run on Linux
+ARM (Raspberry Pi), which has no prebuilt binary yet.
+
+```sh
+docker run -d --name eay-gateway --restart unless-stopped \
+  -p 127.0.0.1:20129:20129 -v eay-data:/data \
+  -e EAY_GATEWAY_ADMIN_TOKEN=change-me ghcr.io/nannndev/eay-gateway
+```
+
+Or use `compose.yaml` from the repo with `EAY_GATEWAY_ADMIN_TOKEN` in a `.env` file. The image is
+`linux/amd64` and `linux/arm64`; data lives in the `/data` volume.
+
+What is different in a container:
+
+- **Admin token is required.** Nothing inside a container looks like localhost, so
+  `/gateway/admin/*` refuses requests without `EAY_GATEWAY_ADMIN_TOKEN`. Send it as
+  `Authorization: Bearer …` or `x-admin-token`.
+- **Browser logins need one extra step.** The login page sends you back to `http://localhost:<port>`
+  on your computer, not into the container. When the page fails to load, copy that URL from the
+  address bar and finish with `POST /gateway/admin/accounts/<provider>/complete`
+  (`{"session_id":"…","callback":"<the URL>"}`), or paste it into eay-console. Device logins
+  (enter a code on a website) work as usual.
+- **Local MCP servers don't run.** The image has no Node or Python, so `npx`/`uvx` servers fail.
+  Use remote (`http`) MCP servers, or run the gateway natively.
+- **Reaching it from other machines:** publish the port on all interfaces (`-p 20129:20129`) only
+  behind your firewall or a reverse proxy with TLS. Give each person a [virtual key](api.md#virtual-keys)
+  with its own limits.
+
 ## Use it from your tools
+
+[Integrations](integrations.md) has setup for Claude Code, Codex, Cursor, Cline, SDKs, desktop
+and web apps. The short version:
 
 Any OpenAI-compatible client works. Use base URL `http://127.0.0.1:20129/v1` and any API key,
 unless you set up [virtual keys](api.md#virtual-keys).
@@ -81,5 +135,7 @@ offer right now.
 
 ## Next
 
+- [Integrations](integrations.md): set up Claude Code, Codex, Cursor, SDKs and apps
 - [Routing](routing.md): control which account handles a request
+- [HTTP API](api.md): agents, tool policies, subagents, approvals and sessions
 - [Configuration](configuration.md): run it for several apps at once
