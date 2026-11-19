@@ -71,6 +71,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          # Only the binaries; the docker job also uploads a .dockerbuild record that fails to extract.
+          pattern: eay-gateway-*
           merge-multiple: true
       - name: Universal binary and checksums
         run: |
