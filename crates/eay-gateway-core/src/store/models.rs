@@ -21,6 +21,8 @@ pub struct UsageEntry<'a> {
     pub agent: Option<&'a str>,
     /// Roster id (`tm_…`) this request was bound to, including a worker the lead started.
     pub team: Option<&'a str>,
+    /// Project id (`prj_…`) the request ran in, from `x-eay-project` or the key's project.
+    pub project: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +131,9 @@ pub struct VirtualKeyRecord {
     /// Which gateway-run MCP tools requests with this key may use.
     #[serde(default, skip_serializing_if = "crate::mcp::ToolPolicy::is_empty")]
     pub tool_policy: crate::mcp::ToolPolicy,
+    /// Every request made with this key runs in this project (`prj_…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub created_at: f64,
     pub last_used_at: Option<f64>,
     pub total_requests: i64,
@@ -173,6 +178,25 @@ pub struct TeamRecord {
     /// The agent the user talks to. Always one of `members`.
     pub lead: String,
     pub members: Vec<String>,
+    /// Project this roster belongs to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub updated_at: f64,
+}
+
+/// A container an app uses to group its work: keys, teams, sessions and usage share one id.
+/// The gateway only uses `instructions` (added as a system prompt); `metadata` belongs to the app
+/// (a repo path, a customer id, a tenant…) and is stored as given.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRecord {
+    /// Stable id (`prj_…`). The name may change.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    pub created_at: f64,
     pub updated_at: f64,
 }
 

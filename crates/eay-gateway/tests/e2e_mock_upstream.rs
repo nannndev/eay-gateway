@@ -747,3 +747,142 @@ async fn the_tree_nests_children_under_their_parent_run() {
     }
     assert_eq!(depth, 3);
 }
+
+async fn send_json(app: &Router, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let st = resp.status();
+    (st, serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn a_project_adds_its_instructions_and_owns_its_usage() {
+    let gw = gateway(false).await;
+    let (st, p) = post_raw(
+        &gw.app,
+        "/gateway/projects",
+        json!({ "name": "Shop", "instructions": "Answer in Indonesian.", "metadata": { "repo": "/code/shop", "tier": 2 } }),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    let p: Value = serde_json::from_str(&p).unwrap();
+    let id = p["project"]["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("prj_"));
+    assert_eq!(p["project"]["metadata"]["repo"], "/code/shop", "metadata is kept as the app sent it");
+
+    let (st, body) =
+        post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-project", &id)]).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let sent = gw.seen.lock().unwrap().last().unwrap()["messages"].clone();
+    assert_eq!(sent[0]["role"], "system");
+    assert!(sent[0]["content"].as_str().unwrap().contains("Answer in Indonesian."), "{sent}");
+
+    // A request outside the project is not counted toward it.
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[]).await;
+    let (st, usage) = get_json(&gw.app, &format!("/gateway/projects/{id}/usage")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(usage["totals"]["requests"], 1, "{usage}");
+    assert_eq!(usage["models"][0]["requests"], 1);
+
+    // Unknown project ids are refused, not silently ignored.
+    let (st, _) =
+        post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-project", "prj_nope")]).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_key_bound_to_a_project_stays_in_it() {
+    let gw = gateway(false).await;
+    let (_, a) = send_json(&gw.app, "POST", "/gateway/projects", json!({ "name": "A" })).await;
+    let (_, b) = send_json(&gw.app, "POST", "/gateway/projects", json!({ "name": "B" })).await;
+    let (a, b) = (a["project"]["id"].as_str().unwrap().to_string(), b["project"]["id"].as_str().unwrap().to_string());
+    let (_, k) = send_json(&gw.app, "POST", "/gateway/keys", json!({ "name": "app-a" })).await;
+    let (key_id, secret) = (k["key"]["id"].as_str().unwrap().to_string(), k["key"]["key"].as_str().unwrap().to_string());
+    let (st, _) = send_json(&gw.app, "PUT", &format!("/gateway/keys/{key_id}/project"), json!({ "project": a })).await;
+    assert_eq!(st, StatusCode::OK);
+    let bearer = format!("Bearer {secret}");
+
+    // No header: the key's project applies.
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("authorization", &bearer)]).await;
+    assert_eq!(get_json(&gw.app, &format!("/gateway/projects/{a}/usage")).await.1["totals"]["requests"], 1);
+    // Asking for another project with this key is refused.
+    let (st, _) = post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "auto", "messages": hello() }),
+        &[("authorization", &bearer), ("x-eay-project", &b)],
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(get_json(&gw.app, &format!("/gateway/projects/{b}/usage")).await.1["totals"]["requests"], 0);
+}
+
+#[tokio::test]
+async fn a_session_belongs_to_one_project_and_deleting_a_project_keeps_its_parts() {
+    let gw = gateway(false).await;
+    let (_, a) = send_json(&gw.app, "POST", "/gateway/projects", json!({ "name": "A" })).await;
+    let (_, b) = send_json(&gw.app, "POST", "/gateway/projects", json!({ "name": "B" })).await;
+    let (a, b) = (a["project"]["id"].as_str().unwrap().to_string(), b["project"]["id"].as_str().unwrap().to_string());
+
+    let ok = post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "auto", "messages": hello() }),
+        &[("x-eay-project", &a), ("x-eay-session-id", "s1")],
+    )
+    .await;
+    assert_eq!(ok.0, StatusCode::OK);
+    // The session is now in A; using it for B is a conflict, and without a header it stays in A.
+    let (st, _) = post_raw(
+        &gw.app,
+        "/v1/chat/completions",
+        json!({ "model": "auto", "messages": hello() }),
+        &[("x-eay-project", &b), ("x-eay-session-id", "s1")],
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-session-id", "s1")]).await;
+    assert_eq!(get_json(&gw.app, &format!("/gateway/projects/{a}/usage")).await.1["totals"]["requests"], 2);
+
+    // The project view lists the session; a team can be linked too.
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "solo", "model": "auto" }), &[]).await;
+    let (_, t) = send_json(&gw.app, "POST", "/gateway/teams", json!({ "name": "crew", "members": ["solo"] })).await;
+    let team = t["team"]["id"].as_str().unwrap_or_else(|| panic!("{t}")).to_string();
+    assert_eq!(send_json(&gw.app, "PUT", &format!("/gateway/teams/{team}/project"), json!({ "project": a })).await.0, StatusCode::OK);
+    let (_, view) = get_json(&gw.app, &format!("/gateway/projects/{a}")).await;
+    assert_eq!(view["sessions"][0]["session"], "s1", "{view}");
+    assert_eq!(view["teams"][0]["id"], team);
+
+    // Deleting the project unlinks, it does not delete the team.
+    assert_eq!(send_json(&gw.app, "DELETE", &format!("/gateway/projects/{a}"), json!(null)).await.1["status"], "deleted");
+    let (_, teams) = get_json(&gw.app, "/gateway/teams").await;
+    let kept = teams["teams"].as_array().unwrap().iter().find(|x| x["id"] == team).unwrap().clone();
+    assert!(kept.get("project").is_none() || kept["project"].is_null(), "{kept}");
+}
+
+#[tokio::test]
+async fn subagents_inherit_the_project_and_count_toward_it() {
+    let gw = gateway(false).await;
+    let (_, p) = send_json(&gw.app, "POST", "/gateway/projects", json!({ "name": "Team work" })).await;
+    let id = p["project"]["id"].as_str().unwrap().to_string();
+    post_raw(&gw.app, "/gateway/agents", json!({ "name": "lead", "model": "auto", "tool_policy": { "max_subagents": 2 } }), &[]).await;
+    let (st, body) =
+        post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "agent/lead", "messages": hello() }), &[("x-eay-project", &id)]).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (_, usage) = get_json(&gw.app, &format!("/gateway/projects/{id}/usage")).await;
+    // The lead's two turns plus the subagent's one all ran in the project.
+    assert_eq!(usage["totals"]["requests"], 3, "{usage}");
+    let agents: Vec<&str> = usage["agents"].as_array().unwrap().iter().filter_map(|a| a["name"].as_str()).collect();
+    assert!(agents.contains(&"lead") && agents.contains(&"Helper"), "{agents:?}");
+}

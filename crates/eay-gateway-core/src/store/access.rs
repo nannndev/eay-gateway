@@ -1,6 +1,6 @@
 use super::{
-    hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, McpServerRecord, SkillRecord, TeamRecord, VirtualKeyRecord,
-    KEY_PREFIX,
+    hash_key, now, query_rows, AgentProfile, GatewaySettings, GatewayStore, McpServerRecord, ProjectRecord, SkillRecord, TeamRecord,
+    VirtualKeyRecord, KEY_PREFIX,
 };
 use rusqlite::params;
 use serde_json::Value;
@@ -40,7 +40,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd, max_concurrent, tool_policy FROM keys ORDER BY created_at DESC",
+            "SELECT id, name, key_prefix, enabled, allowed_providers, rate_limit_per_min, created_at, last_used_at, total_requests, total_input_tokens, total_output_tokens, default_skills, max_tokens_budget, max_cost_usd, max_concurrent, tool_policy, project FROM keys ORDER BY created_at DESC",
             [],
             |r| {
                 let allowed_providers_json: Option<String> = r.get(4)?;
@@ -59,6 +59,7 @@ impl GatewayStore {
                     default_skills,
                     max_concurrent: r.get(14)?,
                     tool_policy: r.get::<_, Option<String>>(15)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+                    project: r.get(16)?,
                     created_at: r.get(6)?,
                     last_used_at: r.get(7)?,
                     total_requests: r.get(8)?,
@@ -105,6 +106,7 @@ impl GatewayStore {
             default_skills: None,
             max_concurrent: None,
             tool_policy: Default::default(),
+            project: None,
             created_at,
             last_used_at: None,
             total_requests: 0,
@@ -352,12 +354,13 @@ impl GatewayStore {
     // ---- Teams (a roster of agents the user assembled) -------------
     pub fn list_teams(&self) -> Vec<TeamRecord> {
         let conn = self.conn.lock();
-        query_rows(&conn, "SELECT id, name, lead, members, updated_at FROM teams ORDER BY name ASC, id ASC", [], |r| {
+        query_rows(&conn, "SELECT id, name, lead, members, updated_at, project FROM teams ORDER BY name ASC, id ASC", [], |r| {
             Ok(TeamRecord {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 lead: r.get(2)?,
                 members: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+                project: r.get(5)?,
                 updated_at: r.get(4)?,
             })
         })
@@ -408,18 +411,129 @@ impl GatewayStore {
         let members_json = serde_json::to_string(&roster).map_err(|e| e.to_string())?;
         let updated_at = now();
         let conn = self.conn.lock();
+        // Keep the project link when an existing roster is edited (INSERT OR REPLACE would drop it).
         conn.execute(
-            "INSERT OR REPLACE INTO teams (id, name, lead, members, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO teams (id, name, lead, members, updated_at, project) VALUES (?1, ?2, ?3, ?4, ?5, (SELECT project FROM teams WHERE id = ?1))",
             params![id, name, lead, members_json, updated_at],
         )
         .map_err(|e| e.to_string())?;
-        Ok(TeamRecord { id, name: name.to_string(), lead, members: roster, updated_at })
+        let project = conn.query_row("SELECT project FROM teams WHERE id = ?1", params![id], |r| r.get(0)).ok().flatten();
+        Ok(TeamRecord { id, name: name.to_string(), lead, members: roster, project, updated_at })
     }
 
     pub fn delete_team(&self, id: &str) -> Result<bool, String> {
         let conn = self.conn.lock();
         let rows = conn.execute("DELETE FROM teams WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
         Ok(rows > 0)
+    }
+
+    // ---- Projects (an app's container for keys, teams, sessions, usage) ----
+    pub fn list_projects(&self) -> Vec<ProjectRecord> {
+        let conn = self.conn.lock();
+        query_rows(
+            &conn,
+            "SELECT id, name, instructions, metadata, created_at, updated_at FROM projects ORDER BY name ASC, id ASC",
+            [],
+            |r| {
+                Ok(ProjectRecord {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    instructions: r.get(2)?,
+                    metadata: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or(Value::Null),
+                    created_at: r.get(4)?,
+                    updated_at: r.get(5)?,
+                })
+            },
+        )
+    }
+
+    pub fn get_project(&self, id: &str) -> Option<ProjectRecord> {
+        self.list_projects().into_iter().find(|p| p.id == id)
+    }
+
+    /// Creates (`id` None → `prj_…`) or updates a project. `metadata` must be a JSON object and is
+    /// stored as the app sent it; the gateway never reads it.
+    pub fn save_project(&self, id: Option<&str>, name: &str, instructions: &str, metadata: &Value) -> Result<ProjectRecord, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 100 {
+            return Err("Project name must be 1-100 characters".into());
+        }
+        if instructions.len() > 20_000 {
+            return Err("Project instructions are limited to 20000 bytes".into());
+        }
+        let metadata = if metadata.is_null() { Value::Object(Default::default()) } else { metadata.clone() };
+        if !metadata.is_object() {
+            return Err("Project metadata must be a JSON object".into());
+        }
+        let meta_json = serde_json::to_string(&metadata).map_err(|e| e.to_string())?;
+        if meta_json.len() > 64 * 1024 {
+            return Err("Project metadata is limited to 64 KB".into());
+        }
+        let existing =
+            id.map(str::trim).filter(|s| !s.is_empty()).map(|i| self.get_project(i).ok_or_else(|| format!("Project '{i}' not found")));
+        let (id, created_at) = match existing {
+            Some(Ok(p)) => (p.id, p.created_at),
+            Some(Err(e)) => return Err(e),
+            None => (format!("prj_{}", &Uuid::new_v4().simple().to_string()[..12]), now()),
+        };
+        let updated_at = now();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO projects (id, name, instructions, metadata, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, name, instructions, meta_json, created_at, updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(ProjectRecord { id, name: name.to_string(), instructions: instructions.to_string(), metadata, created_at, updated_at })
+    }
+
+    /// Deletes a project and unlinks what pointed at it. Keys, teams, sessions and usage stay;
+    /// they just stop belonging to a project. Returns false if there was no such project.
+    pub fn delete_project(&self, id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock();
+        let rows = conn.execute("DELETE FROM projects WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+        if rows > 0 {
+            for table in ["keys", "teams", "sessions"] {
+                conn.execute(&format!("UPDATE {table} SET project = NULL WHERE project = ?1"), params![id]).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(rows > 0)
+    }
+
+    /// Links a key or a team to a project, or unlinks it with `None`. `kind` is `"keys"` or `"teams"`.
+    pub fn set_project_link(&self, kind: &str, id: &str, project: Option<&str>) -> Result<(), String> {
+        let table = match kind {
+            "keys" => "keys",
+            "teams" => "teams",
+            other => return Err(format!("cannot link '{other}' to a project")),
+        };
+        if let Some(p) = project {
+            if self.get_project(p).is_none() {
+                return Err(format!("Project '{p}' not found"));
+            }
+        }
+        let conn = self.conn.lock();
+        let n = conn.execute(&format!("UPDATE {table} SET project = ?2 WHERE id = ?1"), params![id, project]).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err(format!("No {} with id '{id}'", if table == "keys" { "key" } else { "team" }));
+        }
+        Ok(())
+    }
+
+    /// The project a session belongs to, if one was bound.
+    pub fn session_project(&self, id: &str) -> Option<String> {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT project FROM sessions WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0)).ok().flatten()
+    }
+
+    /// Binds a session to a project the first time it is used there. Creates the row if needed.
+    pub fn set_session_project(&self, id: &str, project: &str) -> Result<(), String> {
+        let conn = self.conn.lock();
+        let updated = conn.execute("UPDATE sessions SET project = ?2 WHERE id = ?1", params![id, project]).map_err(|e| e.to_string())?;
+        if updated == 0 {
+            conn.execute("INSERT INTO sessions (id, messages, updated_at, project) VALUES (?1, '[]', ?2, ?3)", params![id, now(), project])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     // ---- Sessions (Conversation Memory) ----------------------------
@@ -436,7 +550,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         // Keep the roster binding. INSERT OR REPLACE would otherwise reset the new `team` column.
         conn.execute(
-            "INSERT OR REPLACE INTO sessions (id, messages, updated_at, team) VALUES (?1, ?2, ?3, (SELECT team FROM sessions WHERE id = ?1))",
+            "INSERT OR REPLACE INTO sessions (id, messages, updated_at, team, project) VALUES (?1, ?2, ?3, (SELECT team FROM sessions WHERE id = ?1), (SELECT project FROM sessions WHERE id = ?1))",
             params![id, json, now()],
         )
         .map_err(|e| e.to_string())?;
@@ -466,7 +580,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, json_array_length(messages), updated_at, team FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+            "SELECT id, json_array_length(messages), updated_at, team, project FROM sessions ORDER BY updated_at DESC LIMIT ?1",
             params![limit as i64],
             |r| {
                 let id: String = r.get(0)?;
@@ -483,6 +597,7 @@ impl GatewayStore {
                     "id": id, "session": name, "owner": owner,
                     "messages": r.get::<_, i64>(1)?, "updated_at": r.get::<_, f64>(2)?,
                     "team": r.get::<_, Option<String>>(3)?,
+                    "project": r.get::<_, Option<String>>(4)?,
                 }))
             },
         )

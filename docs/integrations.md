@@ -193,6 +193,24 @@ A page in the browser can call the gateway directly if its origin is allowed:
 [eay-console](https://github.com/nannndev/eay-console) is a complete example: one HTML file that
 manages providers, keys, MCP servers and agents through the admin API.
 
+## Projects
+
+When your app has separate workspaces (repos, customers, tenants), create one project for each
+and either give each its own key linked to the project, or send `x-eay-project` with requests:
+
+```sh
+curl -X POST http://127.0.0.1:20129/gateway/projects -H 'content-type: application/json' \
+  -d '{"name":"shop","instructions":"This is a Rust web shop. Prefer small changes.","metadata":{"repo":"/code/shop"}}'
+# → {"project":{"id":"prj_…"}}
+
+curl http://127.0.0.1:20129/v1/chat/completions -H 'content-type: application/json' \
+  -H 'x-eay-project: prj_…' -H 'x-eay-session-id: chat-1' \
+  -d '{"model":"agent/lead","messages":[{"role":"user","content":"Add a cart page"}]}'
+```
+
+Every agent in that request, and every subagent it starts, gets the project's instructions, and
+`GET /gateway/projects/prj_…/usage` shows what the project spent. See [Projects](api.md#projects).
+
 ## Agents and orchestration
 
 Permission modes in coding tools (Claude Code's plan mode, Codex's approval modes, Cursor's
