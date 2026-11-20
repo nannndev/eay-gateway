@@ -16,6 +16,12 @@ All notable changes to `eay-gateway` are documented in this file.
   errors, per model, agent and team. Teams link with `PUT /gateway/teams/:id/project`.
 - Deleting a project keeps its keys, teams, sessions and usage, unlinked.
 
+### Fixed
+- Release workflow: publishing downloaded every artifact, including the Docker job's build
+  record, which failed to extract and stopped v0.4.0 from publishing. It now takes only the
+  binaries. Both macOS targets build on one runner, and the universal binary and release are made
+  on Linux, so a release waits for one macOS runner instead of three.
+
 ### Upgrade notes
 - The database gains a `projects` table and `project` columns on keys, teams, sessions and usage,
   added on first start. Existing data is untouched and belongs to no project.

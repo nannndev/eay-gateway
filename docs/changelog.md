@@ -7,6 +7,8 @@ All notable changes to **eay-gateway** are listed below.
 - **Projects:** group keys, teams, sessions and usage under one id (`prj_…`), with shared
   instructions for every agent and free-form metadata for your app. Send `x-eay-project`, or link
   a key so everything it does lands in its project. Usage per project, by model, agent and team.
+- Releases no longer stall on GitHub's macOS runners: both macOS builds share one runner, and
+  publishing runs on Linux. This is what held up the v0.4.0 release files.
 
 ## v0.4.0 — 2026-11-19
 
