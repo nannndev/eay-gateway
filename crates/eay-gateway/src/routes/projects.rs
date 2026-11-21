@@ -187,9 +187,14 @@ pub struct GitActionPayload {
     message: Option<String>,
     #[serde(default)]
     stage_all: bool,
+    branch: Option<String>,
+    commit: Option<String>,
+    limit: Option<u32>,
 }
 
-/// `POST /gateway/projects/:id/git` runs safe structured git actions (stage, unstage, discard, commit, push, pull).
+/// `POST /gateway/projects/:id/git` runs safe structured git actions (stage, unstage, discard,
+/// commit, push, pull, branches, checkout, create_branch, log, show_commit, stash, stash_pop,
+/// stash_list, diff_summary).
 pub async fn handle_project_git(
     State(engine): State<GatewayEngine>,
     Path(id): Path<String>,
@@ -197,7 +202,16 @@ pub async fn handle_project_git(
 ) -> Result<Json<Value>, GatewayError> {
     let root = project_root(&engine, &id)?;
     tokio::task::spawn_blocking(move || {
-        eay_gateway_core::workspace::git_action(&root, &p.action, &p.paths, p.message.as_deref(), p.stage_all)
+        eay_gateway_core::workspace::git_action(
+            &root,
+            &p.action,
+            &p.paths,
+            p.message.as_deref(),
+            p.stage_all,
+            p.branch.as_deref(),
+            p.commit.as_deref(),
+            p.limit,
+        )
     })
     .await
     .map_err(|e| GatewayError::Internal(e.to_string()))?

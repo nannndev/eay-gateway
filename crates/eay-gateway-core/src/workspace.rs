@@ -386,8 +386,19 @@ pub fn git_file_diff(root: &str, rel: &str) -> Result<Value, String> {
     }))
 }
 
-/// Runs a structured, safe Git action inside `root` (stage, unstage, discard, commit, push, pull).
-pub fn git_action(root: &str, action: &str, paths: &[String], message: Option<&str>, stage_all: bool) -> Result<Value, String> {
+/// Runs a structured, safe Git action inside `root` (stage, unstage, discard, commit, push, pull,
+/// branches, checkout, create_branch, log, show_commit, stash, stash_pop, stash_list, diff_summary).
+#[allow(clippy::too_many_arguments)]
+pub fn git_action(
+    root: &str,
+    action: &str,
+    paths: &[String],
+    message: Option<&str>,
+    stage_all: bool,
+    branch: Option<&str>,
+    commit: Option<&str>,
+    limit: Option<u32>,
+) -> Result<Value, String> {
     let root = Path::new(root).canonicalize().map_err(|e| format!("Project folder unavailable: {e}"))?;
     let mut clean_paths: Vec<String> = Vec::new();
     for p in paths {
@@ -414,6 +425,268 @@ pub fn git_action(root: &str, action: &str, paths: &[String], message: Option<&s
         }
         Ok(if !stdout.is_empty() { stdout } else { stderr })
     };
+
+    let validate_ref = |raw: Option<&str>, label: &str| -> Result<String, String> {
+        let val = raw.map(str::trim).unwrap_or("");
+        if val.is_empty() {
+            return Err(format!("{label} is required"));
+        }
+        if val.starts_with('-') || val.contains("..") || val.contains(char::is_whitespace) {
+            return Err(format!("Invalid {label}: '{val}'"));
+        }
+        Ok(val.to_string())
+    };
+
+    match action {
+        "branches" => {
+            let out = exec(&[
+                "for-each-ref".into(),
+                "--sort=-committerdate".into(),
+                "--format=%(HEAD)\t%(refname:short)\t%(upstream:short)".into(),
+                "refs/heads".into(),
+            ])?;
+            let mut branches = Vec::new();
+            let mut current: Option<String> = None;
+            for line in out.lines() {
+                let mut parts = line.split('\t');
+                let head = parts.next().unwrap_or("").trim();
+                let name = parts.next().unwrap_or("").trim();
+                let upstream = parts.next().unwrap_or("").trim();
+                if name.is_empty() {
+                    continue;
+                }
+                let is_cur = head == "*";
+                if is_cur {
+                    current = Some(name.to_string());
+                }
+                branches.push(json!({
+                    "name": name,
+                    "current": is_cur,
+                    "upstream": if upstream.is_empty() { Value::Null } else { Value::String(upstream.to_string()) },
+                }));
+            }
+            return Ok(json!({ "ok": true, "action": action, "current": current, "branches": branches, "output": "" }));
+        }
+        "checkout" => {
+            let b = validate_ref(branch, "Branch name")?;
+            let output = exec(&["checkout".into(), b])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "create_branch" => {
+            let b = validate_ref(branch, "Branch name")?;
+            let output = exec(&["checkout".into(), "-b".into(), b])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "log" => {
+            let n = limit.unwrap_or(20).clamp(1, 100);
+            let out = run_git_sync(&root, &["log", "-n", &n.to_string(), "--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%cr"])?;
+            let mut commits = Vec::new();
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let parts: Vec<&str> = line.split('\x1f').collect();
+                    if parts.len() >= 5 {
+                        commits.push(json!({
+                            "hash": parts[0],
+                            "short_hash": parts[1],
+                            "subject": parts[2],
+                            "author": parts[3],
+                            "date_relative": parts[4],
+                        }));
+                    }
+                }
+            }
+            return Ok(json!({ "ok": true, "action": action, "commits": commits, "output": "" }));
+        }
+        "show_commit" => {
+            let h = validate_ref(commit, "Commit hash")?;
+            let mut output = exec(&["show".into(), "--stat".into(), "--patch".into(), h])?;
+            if output.len() > MAX_CMD_OUTPUT_BYTES {
+                let cut = output.floor_char_boundary(MAX_CMD_OUTPUT_BYTES);
+                output.truncate(cut);
+                output.push_str("\n… commit diff truncated at 64 KB\n");
+            }
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "stash" => {
+            let msg = message.map(str::trim).filter(|m| !m.is_empty()).unwrap_or("eay-workspace stash");
+            let output = exec(&["stash".into(), "push".into(), "-u".into(), "-m".into(), msg.into()])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "stash_pop" => {
+            let output = exec(&["stash".into(), "pop".into()])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "stash_list" => {
+            let out = run_git_sync(&root, &["stash", "list", "--pretty=format:%gd\x1f%gs"])?;
+            let mut stashes = Vec::new();
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let mut parts = line.splitn(2, '\x1f');
+                    if let (Some(r), Some(m)) = (parts.next(), parts.next()) {
+                        stashes.push(json!({ "ref": r, "message": m }));
+                    }
+                }
+            }
+            return Ok(json!({ "ok": true, "action": action, "stashes": stashes, "output": "" }));
+        }
+        "diff_summary" => {
+            let status = run_git_sync(&root, &["status", "--short"])
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let staged_diff = run_git_sync(&root, &["diff", "--cached"])
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let raw_diff = if !staged_diff.trim().is_empty() {
+                staged_diff
+            } else {
+                run_git_sync(&root, &["diff"]).ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+            };
+            let mut combined = format!("Status:\n{status}\nDiff:\n{raw_diff}");
+            if combined.len() > 12_000 {
+                let cut = combined.floor_char_boundary(12_000);
+                combined.truncate(cut);
+                combined.push_str("\n… truncated");
+            }
+            return Ok(json!({ "ok": true, "action": action, "output": combined }));
+        }
+        _ => {}
+    }
+
+    let validate_ref = |raw: Option<&str>, label: &str| -> Result<String, String> {
+        let val = raw.map(str::trim).unwrap_or("");
+        if val.is_empty() {
+            return Err(format!("{label} is required"));
+        }
+        if val.starts_with('-') || val.contains("..") || val.contains(char::is_whitespace) {
+            return Err(format!("Invalid {label}: '{val}'"));
+        }
+        Ok(val.to_string())
+    };
+
+    match action {
+        "branches" => {
+            let out = exec(&[
+                "for-each-ref".into(),
+                "--sort=-committerdate".into(),
+                "--format=%(HEAD)\t%(refname:short)\t%(upstream:short)".into(),
+                "refs/heads".into(),
+            ])?;
+            let mut branches = Vec::new();
+            let mut current: Option<String> = None;
+            for line in out.lines() {
+                let mut parts = line.split('\t');
+                let head = parts.next().unwrap_or("").trim();
+                let name = parts.next().unwrap_or("").trim();
+                let upstream = parts.next().unwrap_or("").trim();
+                if name.is_empty() {
+                    continue;
+                }
+                let is_cur = head == "*";
+                if is_cur {
+                    current = Some(name.to_string());
+                }
+                branches.push(json!({
+                    "name": name,
+                    "current": is_cur,
+                    "upstream": if upstream.is_empty() { Value::Null } else { Value::String(upstream.to_string()) },
+                }));
+            }
+            return Ok(json!({ "ok": true, "action": action, "current": current, "branches": branches, "output": "" }));
+        }
+        "checkout" => {
+            let b = validate_ref(branch, "Branch name")?;
+            let output = exec(&["checkout".into(), b])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "create_branch" => {
+            let b = validate_ref(branch, "Branch name")?;
+            let output = exec(&["checkout".into(), "-b".into(), b])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "log" => {
+            let n = limit.unwrap_or(20).clamp(1, 100);
+            let out = run_git_sync(
+                &root,
+                &["log", "-n", &n.to_string(), "--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%cr"],
+            )?;
+            let mut commits = Vec::new();
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let parts: Vec<&str> = line.split('\x1f').collect();
+                    if parts.len() >= 5 {
+                        commits.push(json!({
+                            "hash": parts[0],
+                            "short_hash": parts[1],
+                            "subject": parts[2],
+                            "author": parts[3],
+                            "date_relative": parts[4],
+                        }));
+                    }
+                }
+            }
+            return Ok(json!({ "ok": true, "action": action, "commits": commits, "output": "" }));
+        }
+        "show_commit" => {
+            let h = validate_ref(commit, "Commit hash")?;
+            let mut output = exec(&["show".into(), "--stat".into(), "--patch".into(), h])?;
+            if output.len() > MAX_CMD_OUTPUT_BYTES {
+                let cut = output.floor_char_boundary(MAX_CMD_OUTPUT_BYTES);
+                output.truncate(cut);
+                output.push_str("\n… commit diff truncated at 64 KB\n");
+            }
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "stash" => {
+            let msg = message.map(str::trim).filter(|m| !m.is_empty()).unwrap_or("eay-workspace stash");
+            let output = exec(&["stash".into(), "push".into(), "-u".into(), "-m".into(), msg.into()])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "stash_pop" => {
+            let output = exec(&["stash".into(), "pop".into()])?;
+            return Ok(json!({ "ok": true, "action": action, "output": output }));
+        }
+        "stash_list" => {
+            let out = run_git_sync(&root, &["stash", "list", "--pretty=format:%gd\x1f%gs"])?;
+            let mut stashes = Vec::new();
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let mut parts = line.splitn(2, '\x1f');
+                    if let (Some(r), Some(m)) = (parts.next(), parts.next()) {
+                        stashes.push(json!({ "ref": r, "message": m }));
+                    }
+                }
+            }
+            return Ok(json!({ "ok": true, "action": action, "stashes": stashes, "output": "" }));
+        }
+        "diff_summary" => {
+            let status = run_git_sync(&root, &["status", "--short"])
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let staged_diff = run_git_sync(&root, &["diff", "--cached"])
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let raw_diff = if !staged_diff.trim().is_empty() {
+                staged_diff
+            } else {
+                run_git_sync(&root, &["diff"])
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .unwrap_or_default()
+            };
+            let mut combined = format!("Status:\n{status}\nDiff:\n{raw_diff}");
+            if combined.len() > 12_000 {
+                let cut = combined.floor_char_boundary(12_000);
+                combined.truncate(cut);
+                combined.push_str("\n… truncated");
+            }
+            return Ok(json!({ "ok": true, "action": action, "output": combined }));
+        }
+        _ => {}
+    }
 
     let output = match action {
         "stage" => {
