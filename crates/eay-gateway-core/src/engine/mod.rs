@@ -833,7 +833,7 @@ impl GatewayEngine {
             let mut text = p.instructions.trim().to_string();
             if let Some(root) = &project_root {
                 let note = format!(
-                    "You work in the project folder {root}. Use the {} tools (paths relative to that folder) to look at and change its files.",
+                    "You work in the project folder {root}. Use the {} tools (paths relative to that folder) to inspect files, edit code, check git status, and run terminal commands (run_command) to verify builds and tests.",
                     crate::workspace::SERVER
                 );
                 text = if text.is_empty() { note } else { format!("{note}\n\n{text}") };
