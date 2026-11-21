@@ -94,10 +94,8 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
         .map(String::from);
     let team = headers.get("x-eay-team").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     let project = headers.get("x-eay-project").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-    let no_failover = headers
-        .get("x-eay-no-failover")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.eq_ignore_ascii_case("true") || v.trim() == "1");
+    let no_failover =
+        headers.get("x-eay-no-failover").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("true") || v.trim() == "1");
     let source = headers
         .get("x-eay-source")
         .and_then(|v| v.to_str().ok())

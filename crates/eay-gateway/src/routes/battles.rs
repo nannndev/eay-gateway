@@ -42,10 +42,7 @@ pub struct SaveBenchmarkPayload {
     data: Value,
 }
 
-pub async fn handle_list_battles(
-    State(engine): State<GatewayEngine>,
-    Query(q): Query<ListLimitQuery>,
-) -> Json<Value> {
+pub async fn handle_list_battles(State(engine): State<GatewayEngine>, Query(q): Query<ListLimitQuery>) -> Json<Value> {
     Json(json!({ "battles": engine.store.list_battles(q.limit.unwrap_or(50)) }))
 }
 
@@ -53,17 +50,11 @@ pub async fn handle_save_battle(
     State(engine): State<GatewayEngine>,
     Json(p): Json<SaveBattlePayload>,
 ) -> Result<Json<Value>, GatewayError> {
-    let battle = engine
-        .store
-        .save_battle(p.id.as_deref(), &p.mode, p.category.as_deref(), &p.data)
-        .map_err(GatewayError::BadRequest)?;
+    let battle = engine.store.save_battle(p.id.as_deref(), &p.mode, p.category.as_deref(), &p.data).map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "battle": battle })))
 }
 
-pub async fn handle_delete_battle(
-    State(engine): State<GatewayEngine>,
-    Path(id): Path<String>,
-) -> Json<Value> {
+pub async fn handle_delete_battle(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
     let deleted = engine.store.delete_battle(&id).unwrap_or(false);
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }
@@ -76,10 +67,7 @@ pub async fn handle_record_elo_match(
     State(engine): State<GatewayEngine>,
     Json(p): Json<RecordEloMatchPayload>,
 ) -> Result<Json<Value>, GatewayError> {
-    let (a, b) = engine
-        .store
-        .record_elo_match(&p.fighter_a, &p.fighter_b, &p.outcome)
-        .map_err(GatewayError::BadRequest)?;
+    let (a, b) = engine.store.record_elo_match(&p.fighter_a, &p.fighter_b, &p.outcome).map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "fighter_a": a, "fighter_b": b })))
 }
 
@@ -88,10 +76,7 @@ pub async fn handle_reset_elo(State(engine): State<GatewayEngine>) -> Result<Jso
     Ok(Json(json!({ "status": "reset" })))
 }
 
-pub async fn handle_list_benchmarks(
-    State(engine): State<GatewayEngine>,
-    Query(q): Query<ListLimitQuery>,
-) -> Json<Value> {
+pub async fn handle_list_benchmarks(State(engine): State<GatewayEngine>, Query(q): Query<ListLimitQuery>) -> Json<Value> {
     Json(json!({ "benchmarks": engine.store.list_benchmarks(q.limit.unwrap_or(50)) }))
 }
 
@@ -99,17 +84,11 @@ pub async fn handle_save_benchmark(
     State(engine): State<GatewayEngine>,
     Json(p): Json<SaveBenchmarkPayload>,
 ) -> Result<Json<Value>, GatewayError> {
-    let benchmark = engine
-        .store
-        .save_benchmark(p.id.as_deref(), &p.suite_id, &p.name, &p.data)
-        .map_err(GatewayError::BadRequest)?;
+    let benchmark = engine.store.save_benchmark(p.id.as_deref(), &p.suite_id, &p.name, &p.data).map_err(GatewayError::BadRequest)?;
     Ok(Json(json!({ "benchmark": benchmark })))
 }
 
-pub async fn handle_delete_benchmark(
-    State(engine): State<GatewayEngine>,
-    Path(id): Path<String>,
-) -> Json<Value> {
+pub async fn handle_delete_benchmark(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {
     let deleted = engine.store.delete_benchmark(&id).unwrap_or(false);
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }

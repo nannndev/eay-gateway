@@ -35,13 +35,7 @@ impl GatewayStore {
         )
     }
 
-    pub fn save_battle(
-        &self,
-        id: Option<&str>,
-        mode: &str,
-        category: Option<&str>,
-        data: &Value,
-    ) -> Result<BattleRecord, String> {
+    pub fn save_battle(&self, id: Option<&str>, mode: &str, category: Option<&str>, data: &Value) -> Result<BattleRecord, String> {
         let mode = mode.trim();
         if mode.is_empty() {
             return Err("Battle mode is required".into());
@@ -91,12 +85,7 @@ impl GatewayStore {
     }
 
     /// Updates two fighters' ELO ratings based on outcome: `"a"`, `"b"`, `"tie"`, or `"both_bad"`.
-    pub fn record_elo_match(
-        &self,
-        fighter_a: &str,
-        fighter_b: &str,
-        outcome: &str,
-    ) -> Result<(EloRatingRecord, EloRatingRecord), String> {
+    pub fn record_elo_match(&self, fighter_a: &str, fighter_b: &str, outcome: &str) -> Result<(EloRatingRecord, EloRatingRecord), String> {
         let a_name = fighter_a.trim();
         let b_name = fighter_b.trim();
         if a_name.is_empty() || b_name.is_empty() {
@@ -211,13 +200,7 @@ impl GatewayStore {
         )
     }
 
-    pub fn save_benchmark(
-        &self,
-        id: Option<&str>,
-        suite_id: &str,
-        name: &str,
-        data: &Value,
-    ) -> Result<BenchmarkRunRecord, String> {
+    pub fn save_benchmark(&self, id: Option<&str>, suite_id: &str, name: &str, data: &Value) -> Result<BenchmarkRunRecord, String> {
         let suite_id = suite_id.trim();
         let name = name.trim();
         if suite_id.is_empty() || name.is_empty() {
@@ -236,13 +219,7 @@ impl GatewayStore {
             params![id, suite_id, name, data_json, created_at],
         )
         .map_err(|e| e.to_string())?;
-        Ok(BenchmarkRunRecord {
-            id,
-            suite_id: suite_id.to_string(),
-            name: name.to_string(),
-            data: data.clone(),
-            created_at,
-        })
+        Ok(BenchmarkRunRecord { id, suite_id: suite_id.to_string(), name: name.to_string(), data: data.clone(), created_at })
     }
 
     pub fn delete_benchmark(&self, id: &str) -> Result<bool, String> {

@@ -21,13 +21,16 @@ struct RepoStats {
     github_url: String,
 }
 
-fn repo_stats_cache() -> &'static Mutex<HashMap<String, (Instant, Option<RepoStats>)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Option<RepoStats>)>>> = OnceLock::new();
+type RepoStatsCache = Mutex<HashMap<String, (Instant, Option<RepoStats>)>>;
+type MarketplaceQueryCache = Mutex<HashMap<String, (Instant, Vec<Value>)>>;
+
+fn repo_stats_cache() -> &'static RepoStatsCache {
+    static CACHE: OnceLock<RepoStatsCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn marketplace_query_cache() -> &'static Mutex<HashMap<String, (Instant, Vec<Value>)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Vec<Value>)>>> = OnceLock::new();
+fn marketplace_query_cache() -> &'static MarketplaceQueryCache {
+    static CACHE: OnceLock<MarketplaceQueryCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -44,24 +47,13 @@ async fn fetch_repo_stats(engine: GatewayEngine, source: String) -> (String, Opt
     }
 
     let url = format!("https://ungh.cc/repos/{source}");
-    let stats = match engine
-        .http_client
-        .get(&url)
-        .header("User-Agent", "eay-gateway/0.6")
-        .timeout(Duration::from_secs(3))
-        .send()
-        .await
-    {
+    let stats = match engine.http_client.get(&url).header("User-Agent", "eay-gateway/0.6").timeout(Duration::from_secs(3)).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
             Ok(v) => v.get("repo").map(|r| RepoStats {
                 stars: r.get("stars").and_then(Value::as_u64).unwrap_or(0),
                 forks: r.get("forks").and_then(Value::as_u64).unwrap_or(0),
                 watchers: r.get("watchers").and_then(Value::as_u64).unwrap_or(0),
-                description: r
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty()),
+                description: r.get("description").and_then(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
                 pushed_at: r.get("pushedAt").and_then(Value::as_str).map(String::from),
                 default_branch: r.get("defaultBranch").and_then(Value::as_str).map(String::from),
                 github_url: format!("https://github.com/{source}"),
@@ -172,11 +164,10 @@ pub async fn handle_marketplace_search(
     let offset = query.offset.unwrap_or(0);
     let cache_key = q.to_lowercase();
 
-    let cached_all = marketplace_query_cache().lock().ok().and_then(|g| {
-        g.get(&cache_key)
-            .filter(|(ts, _)| ts.elapsed() < QUERY_CACHE_TTL)
-            .map(|(_, items)| items.clone())
-    });
+    let cached_all = marketplace_query_cache()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&cache_key).filter(|(ts, _)| ts.elapsed() < QUERY_CACHE_TTL).map(|(_, items)| items.clone()));
 
     let all_skills = if let Some(items) = cached_all {
         items
@@ -192,21 +183,11 @@ pub async fn handle_marketplace_search(
             .map_err(|e| GatewayError::BadGateway(format!("Failed to reach skills.sh: {e}")))?;
 
         if !res.status().is_success() {
-            return Err(GatewayError::BadGateway(format!(
-                "skills.sh returned HTTP {}",
-                res.status().as_u16()
-            )));
+            return Err(GatewayError::BadGateway(format!("skills.sh returned HTTP {}", res.status().as_u16())));
         }
-        let body: Value = res
-            .json()
-            .await
-            .map_err(|e| GatewayError::BadGateway(format!("Invalid JSON from skills.sh: {e}")))?;
+        let body: Value = res.json().await.map_err(|e| GatewayError::BadGateway(format!("Invalid JSON from skills.sh: {e}")))?;
 
-        let items = body
-            .get("skills")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let items = body.get("skills").and_then(Value::as_array).cloned().unwrap_or_default();
 
         if let Ok(mut guard) = marketplace_query_cache().lock() {
             if guard.len() > 100 {
@@ -219,11 +200,7 @@ pub async fn handle_marketplace_search(
 
     let total = all_skills.len();
     let end = (offset + limit).min(total);
-    let mut skills: Vec<Value> = if offset < total {
-        all_skills[offset..end].to_vec()
-    } else {
-        Vec::new()
-    };
+    let mut skills: Vec<Value> = if offset < total { all_skills[offset..end].to_vec() } else { Vec::new() };
     let has_more = end < total;
 
     // Concurrently enrich unique GitHub repositories in this page with cached star/fork/description stats
@@ -277,20 +254,15 @@ pub async fn handle_marketplace_fetch(
     let source = payload.source.trim();
     let skill_id = payload.skill_id.trim();
     if !is_safe_repo(source) {
-        return Err(GatewayError::BadRequest(
-            "Invalid GitHub repository source (expected owner/repo)".into(),
-        ));
+        return Err(GatewayError::BadRequest("Invalid GitHub repository source (expected owner/repo)".into()));
     }
     if !is_safe_skill_id(skill_id) {
         return Err(GatewayError::BadRequest("Invalid skillId".into()));
     }
 
     let stripped = skill_id.split_once('-').map(|(_, rest)| rest).filter(|r| !r.is_empty());
-    let mut candidates = vec![
-        format!("skills/{skill_id}/SKILL.md"),
-        format!("{skill_id}/SKILL.md"),
-        format!(".claude/skills/{skill_id}/SKILL.md"),
-    ];
+    let mut candidates =
+        vec![format!("skills/{skill_id}/SKILL.md"), format!("{skill_id}/SKILL.md"), format!(".claude/skills/{skill_id}/SKILL.md")];
     if let Some(short) = stripped {
         candidates.push(format!("skills/{short}/SKILL.md"));
         candidates.push(format!("{short}/SKILL.md"));
@@ -302,13 +274,8 @@ pub async fn handle_marketplace_fetch(
     'direct: for branch in ["main", "master"] {
         for path in &candidates {
             let url = format!("https://raw.githubusercontent.com/{source}/{branch}/{path}");
-            if let Ok(resp) = engine
-                .http_client
-                .get(&url)
-                .header("User-Agent", "eay-gateway/0.6")
-                .timeout(std::time::Duration::from_secs(8))
-                .send()
-                .await
+            if let Ok(resp) =
+                engine.http_client.get(&url).header("User-Agent", "eay-gateway/0.6").timeout(std::time::Duration::from_secs(8)).send().await
             {
                 if resp.status().is_success() {
                     if let Ok(text) = resp.text().await {
@@ -349,11 +316,7 @@ pub async fn handle_marketplace_fetch(
                     let best_path = skill_paths
                         .iter()
                         .find(|p| p.to_lowercase().contains(&needle_lower))
-                        .or_else(|| {
-                            short_lower
-                                .as_ref()
-                                .and_then(|s| skill_paths.iter().find(|p| p.to_lowercase().contains(s)))
-                        })
+                        .or_else(|| short_lower.as_ref().and_then(|s| skill_paths.iter().find(|p| p.to_lowercase().contains(s))))
                         .or_else(|| skill_paths.first());
 
                     if let Some(path) = best_path {
@@ -381,9 +344,7 @@ pub async fn handle_marketplace_fetch(
     }
 
     let Some((raw, source_url, path)) = found else {
-        return Err(GatewayError::NotFound(format!(
-            "Could not locate SKILL.md for '{skill_id}' in github.com/{source}"
-        )));
+        return Err(GatewayError::NotFound(format!("Could not locate SKILL.md for '{skill_id}' in github.com/{source}")));
     };
 
     let (fm_name, fm_desc, body) = parse_skill_frontmatter(&raw);

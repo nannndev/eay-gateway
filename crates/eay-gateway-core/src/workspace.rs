@@ -277,10 +277,7 @@ async fn run_shell_command(root: &Path, args: &Value) -> Result<String, String> 
     if !cwd.is_dir() {
         return Err(format!("Working directory '{}' does not exist", shown(&root, &cwd)));
     }
-    let timeout_secs = args["timeout_secs"]
-        .as_u64()
-        .unwrap_or(DEFAULT_CMD_TIMEOUT_SECS)
-        .clamp(1, MAX_CMD_TIMEOUT_SECS);
+    let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(DEFAULT_CMD_TIMEOUT_SECS).clamp(1, MAX_CMD_TIMEOUT_SECS);
 
     let mut cmd = if cfg!(windows) {
         let mut c = tokio::process::Command::new("cmd");
@@ -298,13 +295,10 @@ async fn run_shell_command(root: &Path, args: &Value) -> Result<String, String> 
         .kill_on_drop(true);
 
     let child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {e}"))?;
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| format!("Command timed out after {timeout_secs}s: {command}"))?
-    .map_err(|e| format!("Command execution failed: {e}"))?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait_with_output())
+        .await
+        .map_err(|_| format!("Command timed out after {timeout_secs}s: {command}"))?
+        .map_err(|e| format!("Command execution failed: {e}"))?;
 
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -373,12 +367,8 @@ async fn run_git_status(root: &Path, args: &Value) -> Result<String, String> {
 /// Runs one tool. Errors come back as text for the model, like an MCP tool error would.
 pub async fn call(root: String, tool: String, args: Value) -> String {
     match tool.as_str() {
-        "run_command" => run_shell_command(Path::new(&root), &args)
-            .await
-            .unwrap_or_else(|e| format!("Error: {e}")),
-        "git_status" => run_git_status(Path::new(&root), &args)
-            .await
-            .unwrap_or_else(|e| format!("Error: {e}")),
+        "run_command" => run_shell_command(Path::new(&root), &args).await.unwrap_or_else(|e| format!("Error: {e}")),
+        "git_status" => run_git_status(Path::new(&root), &args).await.unwrap_or_else(|e| format!("Error: {e}")),
         _ => tokio::task::spawn_blocking(move || run(Path::new(&root), &tool, &args).unwrap_or_else(|e| format!("Error: {e}")))
             .await
             .unwrap_or_else(|e| format!("Error: {e}")),
@@ -484,11 +474,7 @@ fn run(root: &Path, tool: &str, args: &Value) -> Result<String, String> {
                 } else if p.metadata().is_ok_and(|m| m.len() <= 1024 * 1024) {
                     let Ok(text) = std::fs::read_to_string(&p) else { continue };
                     for (i, line) in text.lines().enumerate() {
-                        let matched = if case_insensitive {
-                            line.to_lowercase().contains(&needle_lower)
-                        } else {
-                            line.contains(pattern)
-                        };
+                        let matched = if case_insensitive { line.to_lowercase().contains(&needle_lower) } else { line.contains(pattern) };
                         if matched {
                             hits.push(format!("{}:{}: {}", shown(&root, &p), i + 1, line.trim().chars().take(200).collect::<String>()));
                             if hits.len() >= MAX_GREP_HITS {
