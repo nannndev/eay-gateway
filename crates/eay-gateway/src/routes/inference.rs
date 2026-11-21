@@ -94,6 +94,16 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
         .map(String::from);
     let team = headers.get("x-eay-team").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     let project = headers.get("x-eay-project").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let no_failover = headers
+        .get("x-eay-no-failover")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("true") || v.trim() == "1");
+    let source = headers
+        .get("x-eay-source")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .map(String::from);
     ChatOptions {
         skills,
         session_id,
@@ -104,6 +114,8 @@ fn chat_options_from_headers(headers: &HeaderMap) -> ChatOptions {
         mcp_servers,
         mcp_allowed: super::is_loopback_host(headers),
         run_id,
+        no_failover,
+        source,
         ..Default::default()
     }
 }
@@ -119,15 +131,30 @@ pub async fn handle_chat_completions(
         Err(e) => return e.into_response(),
     };
     let opts = chat_options_from_headers(&headers);
+    let echo_run_id = opts.run_id.clone();
     match engine.chat_completions_with_options(key, payload, opts).await {
         Ok(ChatReply::Stream(frames)) => {
             let mut resp = Response::new(Body::from_stream(frames));
             let h = resp.headers_mut();
             h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
             h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            if let Some(rid) = echo_run_id.and_then(|s| HeaderValue::from_str(&s).ok()) {
+                h.insert("x-eay-run-id", rid);
+            }
             resp
         }
-        Ok(ChatReply::Json(v)) => Json(v).into_response(),
+        Ok(ChatReply::Json(v)) => {
+            let routed = v.get("model").and_then(|m| m.as_str()).map(String::from);
+            let mut resp = Json(v).into_response();
+            let h = resp.headers_mut();
+            if let Some(rid) = echo_run_id.and_then(|s| HeaderValue::from_str(&s).ok()) {
+                h.insert("x-eay-run-id", rid);
+            }
+            if let Some(m) = routed.and_then(|s| HeaderValue::from_str(&s).ok()) {
+                h.insert("x-eay-routed-model", m);
+            }
+            resp
+        }
         Err(e) => (StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY), Json(e.body)).into_response(),
     }
 }

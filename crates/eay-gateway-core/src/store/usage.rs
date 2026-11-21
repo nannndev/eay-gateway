@@ -7,7 +7,7 @@ impl GatewayStore {
     // ---- Usage & Stats ---------------------------------------------
     pub fn list_usage(&self, limit: i64) -> Vec<Value> {
         let conn = self.conn.lock();
-        query_rows(&conn, "SELECT id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, agent, team FROM usage ORDER BY ts DESC LIMIT ?1", params![limit], |r| {
+        query_rows(&conn, "SELECT id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, agent, team, source FROM usage ORDER BY ts DESC LIMIT ?1", params![limit], |r| {
                 Ok(json!({
                     "id": r.get::<_, String>(0)?,
                     "ts": r.get::<_, f64>(1)?,
@@ -24,6 +24,7 @@ impl GatewayStore {
                     "streaming": r.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0,
                     "agent": r.get::<_, Option<String>>(13)?,
                     "team": r.get::<_, Option<String>>(14)?,
+                    "source": r.get::<_, Option<String>>(15)?,
                 }))
             })
     }
@@ -41,12 +42,13 @@ impl GatewayStore {
         let agent = clip_usage_label(u.agent);
         let team = clip_usage_label(u.team);
         let project = clip_usage_label(u.project);
+        let source = clip_usage_label(u.source);
         let _ = conn.execute(
-            "INSERT INTO usage (id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, cached_tokens, cost, agent, team, project) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO usage (id, ts, key_id, key_name, provider, model, input_tokens, output_tokens, duration_ms, status, status_code, error, streaming, cached_tokens, cost, agent, team, project, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 id, now(), u.key_id, u.key_name, u.provider, u.model,
                 u.input_tokens, u.output_tokens, u.duration_ms, u.status, u.status_code, u.error,
-                i64::from(u.streaming), u.cached_tokens, cost, agent, team, project
+                i64::from(u.streaming), u.cached_tokens, cost, agent, team, project, source
             ],
         );
     }

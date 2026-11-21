@@ -33,6 +33,11 @@ pub struct ChatOptions {
     /// Project from `x-eay-project` (id `prj_…`). A key bound to a project overrides it; a child run
     /// inherits its parent's.
     pub project: Option<String>,
+    /// When true (`x-eay-no-failover: true`), stop immediately on the first upstream failure instead
+    /// of falling back to another model/provider. Useful for honest benchmarking & battle arenas.
+    pub no_failover: bool,
+    /// Optional caller tag from `x-eay-source` (e.g. "workspace", "battle", "benchmark").
+    pub source: Option<String>,
 }
 
 /// Who a usage row is billed to. Cloned into stream guards, so it owns its strings.
@@ -44,6 +49,8 @@ pub(crate) struct UsageTags {
     pub team: Option<String>,
     /// Project id (`prj_…`).
     pub project: Option<String>,
+    /// Caller tag from `x-eay-source`.
+    pub source: Option<String>,
 }
 
 /// Roster for one request. `id` is empty until the header or the session has been resolved.
@@ -479,6 +486,7 @@ impl GatewayEngine {
             agent: tags.agent.as_deref(),
             team: tags.team.as_deref(),
             project: tags.project.as_deref(),
+            source: tags.source.as_deref(),
         });
         let mut msg = format!("{} HTTP {}: {}", target.public(), status, err_text.chars().take(300).collect::<String>());
         if let Some(secs) = cooldown_for(status.as_u16(), retry_after, &err_text, cooldown_secs) {
@@ -639,6 +647,7 @@ impl GatewayEngine {
                 agent: None,
                 team: None,
                 project: passthrough_tags.project.as_deref(),
+                source: None,
             });
             return Ok(PassthroughReply { status: status.as_u16(), content_type, body: resp_bytes });
         }
@@ -826,7 +835,12 @@ impl GatewayEngine {
         let agent_label = opts.agent_label.clone().or_else(|| agent_personality.as_ref().map(|(n, _)| n.clone()));
         // Usage names the saved agent. A worker with no profile keeps its role. A raw model stays blank.
         let usage_agent = running_agent.clone().or(agent_label.clone()).filter(|name| !name.is_empty());
-        let usage_tags = UsageTags { agent: usage_agent.clone(), team: team_id.clone(), project: project.as_ref().map(|p| p.id.clone()) };
+        let usage_tags = UsageTags {
+            agent: usage_agent.clone(),
+            team: team_id.clone(),
+            project: project.as_ref().map(|p| p.id.clone()),
+            source: opts.source.clone(),
+        };
         // The project's instructions come first, so an agent's personality and skills refine them.
         let project_root = project.as_ref().and_then(|p| p.root.clone());
         let project_text = project.as_ref().map(|p| {
@@ -941,6 +955,7 @@ impl GatewayEngine {
                             agent_label.as_deref(),
                             media_req,
                             &usage_tags,
+                            opts.no_failover,
                         )
                         .await?
                     else {
@@ -1132,6 +1147,7 @@ impl GatewayEngine {
                 agent_label.as_deref(),
                 media_req,
                 &usage_tags,
+                opts.no_failover,
             )
             .await?;
         team.settle_chat(&reply);
@@ -1225,6 +1241,7 @@ impl GatewayEngine {
         agent_label: Option<&str>,
         media_req: crate::translate::MediaRequirements,
         tags: &UsageTags,
+        no_failover: bool,
     ) -> Result<ChatReply, ChatError> {
         let wants_stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
         let (mut targets, settings, key_name) = self.check_key_and_resolve(key, req_model)?;
@@ -1305,6 +1322,9 @@ impl GatewayEngine {
                     Some(&target_pub),
                     None,
                 );
+                if no_failover {
+                    break;
+                }
                 continue;
             };
             if !upstream.status().is_success() {
@@ -1332,6 +1352,9 @@ impl GatewayEngine {
                     Some(&target_pub),
                     None,
                 );
+                if no_failover {
+                    break;
+                }
                 continue;
             }
             self.store.clear_cooldown(&cool);
@@ -1769,6 +1792,7 @@ mod tests {
                 agent: None,
                 team: None,
                 project: None,
+                source: None,
             });
         }
         assert!(e.admit_rate(Some(&k)).is_ok());

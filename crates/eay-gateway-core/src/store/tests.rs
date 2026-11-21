@@ -229,6 +229,7 @@ mod virtual_keys {
             agent: None,
             team: None,
             project: None,
+            source: None,
         });
         assert_eq!(s.key_requests_since(&rec.id, now() - 60.0), 1);
     }
@@ -310,6 +311,7 @@ mod analytics {
             agent: None,
             team: None,
             project: None,
+            source: None,
         });
     }
 
@@ -368,6 +370,7 @@ mod analytics {
             agent: None,
             team: None,
             project: None,
+            source: None,
         });
         assert_eq!(s.analytics(Some(1), 0)["days"][0]["cost"], 2.0);
     }
@@ -391,6 +394,7 @@ mod analytics {
             agent: None,
             team: None,
             project: None,
+            source: None,
         });
         assert_eq!(s.analytics(Some(1), 0)["days"][0]["cached"], 6);
     }
@@ -419,6 +423,7 @@ mod analytics {
             agent,
             team,
             project: None,
+            source: None,
         });
     }
 
@@ -475,6 +480,7 @@ mod stats {
             agent: None,
             team: None,
             project: None,
+            source: None,
         });
     }
 
@@ -571,5 +577,32 @@ mod upgrade_to_projects {
         s.set_session_project("local:s1", &p.id).unwrap();
         assert_eq!(s.session_project("local:s1").as_deref(), Some(p.id.as_str()));
         assert_eq!(s.get_session_messages("local:s1").len(), 1, "binding a project keeps the chat");
+    }
+}
+
+mod battles {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn battles_elo_and_benchmarks_roundtrip() {
+        let (s, _d) = store();
+        let b = s.save_battle(None, "blind", Some("coding"), &json!({ "prompt": "hi" })).unwrap();
+        assert!(b.id.starts_with("btl_"));
+        assert_eq!(s.list_battles(10).len(), 1);
+        assert!(s.delete_battle(&b.id).unwrap());
+
+        let (a, b_rat) = s.record_elo_match("openai/gpt-4o", "anthropic/claude-sonnet", "a").unwrap();
+        assert!(a.rating > 1200.0 && b_rat.rating < 1200.0);
+        assert_eq!(a.wins, 1);
+        assert_eq!(b_rat.losses, 1);
+        assert_eq!(s.list_elo_ratings().len(), 2);
+        s.reset_elo_ratings().unwrap();
+        assert!(s.list_elo_ratings().is_empty());
+
+        let bn = s.save_benchmark(None, "fullstack-v1", "Nov Run", &json!({ "pass_rate": 0.9 })).unwrap();
+        assert!(bn.id.starts_with("bnch_"));
+        assert_eq!(s.list_benchmarks(10).len(), 1);
+        assert!(s.delete_benchmark(&bn.id).unwrap());
     }
 }

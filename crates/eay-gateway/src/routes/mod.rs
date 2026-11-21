@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod agents;
+pub mod battles;
 pub mod connectors;
 pub mod inference;
 pub mod keys;
@@ -89,6 +90,10 @@ fn add_cors_origin(h: &mut axum::http::HeaderMap, origin: &str) {
     if let Ok(v) = axum::http::HeaderValue::from_str(origin) {
         h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
         h.insert(header::VARY, axum::http::HeaderValue::from_static("Origin"));
+        h.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            axum::http::HeaderValue::from_static("x-eay-run-id, x-eay-routed-model, x-eay-provider, x-eay-cost-usd"),
+        );
     }
 }
 
@@ -295,6 +300,13 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/stats", get(settings::handle_get_stats))
         .route("/gateway/analytics", get(settings::handle_analytics))
         .route("/gateway/settings", get(settings::handle_get_settings).post(settings::handle_update_settings))
+        // Battles, ELO Ratings & Benchmarks (eay-battle)
+        .route("/gateway/battles", get(battles::handle_list_battles).post(battles::handle_save_battle))
+        .route("/gateway/battles/:id", delete(battles::handle_delete_battle))
+        .route("/gateway/elo", get(battles::handle_list_elo).delete(battles::handle_reset_elo))
+        .route("/gateway/elo/match", post(battles::handle_record_elo_match))
+        .route("/gateway/benchmarks", get(battles::handle_list_benchmarks).post(battles::handle_save_benchmark))
+        .route("/gateway/benchmarks/:id", delete(battles::handle_delete_benchmark))
         .layer(middleware::from_fn(admin_auth_middleware));
 
     // CORS sits outside every other layer so preflights never reach auth or concurrency checks.

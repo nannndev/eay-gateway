@@ -23,6 +23,38 @@ pub struct UsageEntry<'a> {
     pub team: Option<&'a str>,
     /// Project id (`prj_…`) the request ran in, from `x-eay-project` or the key's project.
     pub project: Option<&'a str>,
+    /// Optional caller tag from `x-eay-source` (e.g. "workspace", "battle", "benchmark").
+    pub source: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BattleRecord {
+    pub id: String,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub data: Value,
+    pub created_at: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EloRatingRecord {
+    pub fighter: String,
+    pub rating: f64,
+    pub wins: i64,
+    pub losses: i64,
+    pub ties: i64,
+    pub matches: i64,
+    pub updated_at: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkRunRecord {
+    pub id: String,
+    pub suite_id: String,
+    pub name: String,
+    pub data: Value,
+    pub created_at: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
