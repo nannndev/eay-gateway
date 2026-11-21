@@ -111,6 +111,8 @@ sessions, and the MCP tool-list cache.
 
 ## Embedding the core in Rust
 
+Full module and API reference: [Core library](/core).
+
 ```toml
 [dependencies]
 eay-gateway-core = { git = "https://github.com/nannndev/eay-gateway" }

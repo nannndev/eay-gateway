@@ -351,6 +351,14 @@ impl GatewayStore {
         Ok(rows > 0)
     }
 
+    pub fn toggle_agent(&self, name: &str) -> Result<AgentProfile, String> {
+        let conn = self.conn.lock();
+        conn.execute("UPDATE agents SET enabled = 1 - enabled, updated_at = ?1 WHERE name = ?2", params![now(), name])
+            .map_err(|e| e.to_string())?;
+        drop(conn);
+        self.get_agent(name).ok_or_else(|| "Agent not found".to_string())
+    }
+
     // ---- Teams (a roster of agents the user assembled) -------------
     pub fn list_teams(&self) -> Vec<TeamRecord> {
         let conn = self.conn.lock();

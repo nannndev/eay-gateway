@@ -1,5 +1,6 @@
 mod access;
 mod accounts;
+mod battles;
 mod models;
 mod providers;
 mod usage;
@@ -8,8 +9,8 @@ mod usage;
 mod tests;
 
 pub use models::{
-    AccountRecord, AgentProfile, GatewaySettings, McpServerRecord, ProjectRecord, ProviderRecord, SkillRecord, TeamRecord, UsageEntry,
-    VirtualKeyRecord,
+    AccountRecord, AgentProfile, BattleRecord, BenchmarkRunRecord, EloRatingRecord, GatewaySettings, McpServerRecord, ProjectRecord,
+    ProviderRecord, SkillRecord, TeamRecord, UsageEntry, VirtualKeyRecord,
 };
 
 use crate::cipher::Cipher;
@@ -142,6 +143,22 @@ impl GatewayStore {
               env TEXT NOT NULL DEFAULT '{}', url TEXT,
               enabled INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS battles (
+              id TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'blind',
+              category TEXT, data TEXT NOT NULL, created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS battles_created ON battles(created_at DESC);
+            CREATE TABLE IF NOT EXISTS elo_ratings (
+              fighter TEXT PRIMARY KEY, rating REAL NOT NULL DEFAULT 1200.0,
+              wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0,
+              ties INTEGER NOT NULL DEFAULT 0, matches INTEGER NOT NULL DEFAULT 0,
+              updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS benchmarks (
+              id TEXT PRIMARY KEY, suite_id TEXT NOT NULL, name TEXT NOT NULL,
+              data TEXT NOT NULL, created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS benchmarks_created ON benchmarks(created_at DESC);
             "#,
         )
         .map_err(|e| format!("Failed to init gateway schema: {}", e))?;
@@ -171,6 +188,7 @@ impl GatewayStore {
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS usage_project ON usage(project, ts)", []);
         let _ = conn.execute("ALTER TABLE projects ADD COLUMN root TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT", []);
+        let _ = conn.execute("ALTER TABLE usage ADD COLUMN source TEXT", []);
         Ok(())
     }
 }

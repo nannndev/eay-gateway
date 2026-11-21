@@ -110,11 +110,43 @@ impl ToolPolicy {
         }
     }
 
+    fn glob_match(pat: &str, text: &str) -> bool {
+        if pat == "*" {
+            return true;
+        }
+        if !pat.contains('*') {
+            return pat == text;
+        }
+        let parts: Vec<&str> = pat.split('*').collect();
+        let mut pos = 0usize;
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                continue;
+            }
+            if i == 0 {
+                if !text.starts_with(part) {
+                    return false;
+                }
+                pos = part.len();
+            } else if i == parts.len() - 1 {
+                if !text[pos..].ends_with(part) {
+                    return false;
+                }
+                pos = text.len();
+            } else if let Some(idx) = text[pos..].find(part) {
+                pos += idx + part.len();
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
     fn matches(pattern: &str, t: &McpToolRef) -> bool {
-        match pattern.split_once('/') {
-            Some((srv, "*")) => srv == t.server,
-            Some((srv, tool)) => srv == t.server && tool == t.tool,
-            None => pattern == t.tool,
+        let pat = pattern.trim();
+        match pat.split_once('/') {
+            Some((srv, tool)) => Self::glob_match(srv, &t.server) && Self::glob_match(tool, &t.tool),
+            None => Self::glob_match(pat, &t.tool),
         }
     }
 

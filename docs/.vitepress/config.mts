@@ -29,6 +29,7 @@ export default defineConfig({
         items: [
           { text: 'HTTP API', link: '/api' },
           { text: 'Architecture', link: '/architecture' },
+          { text: 'Core Library', link: '/core' },
           { text: 'Development', link: '/development' },
           { text: 'Changelog', link: '/changelog' },
         ],
@@ -55,6 +56,7 @@ export default defineConfig({
         items: [
           { text: 'HTTP & Admin API', link: '/api' },
           { text: 'Architecture & Storage', link: '/architecture' },
+          { text: 'Core Library (Rust)', link: '/core' },
           { text: 'Development & Testing', link: '/development' },
           { text: 'Changelog', link: '/changelog' },
         ],

@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod agents;
+pub mod battles;
 pub mod connectors;
 pub mod inference;
 pub mod keys;
@@ -89,6 +90,10 @@ fn add_cors_origin(h: &mut axum::http::HeaderMap, origin: &str) {
     if let Ok(v) = axum::http::HeaderValue::from_str(origin) {
         h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
         h.insert(header::VARY, axum::http::HeaderValue::from_static("Origin"));
+        h.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            axum::http::HeaderValue::from_static("x-eay-run-id, x-eay-routed-model, x-eay-provider, x-eay-cost-usd"),
+        );
     }
 }
 
@@ -258,10 +263,13 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/combos/:name", put(settings::handle_put_combo).delete(settings::handle_delete_combo))
         // Skills (Context Presets) & Agents (Personalities) & Sessions
         .route("/gateway/skills", get(skills::handle_list_skills).post(skills::handle_save_skill))
+        .route("/gateway/skills/marketplace", get(skills::handle_marketplace_search))
+        .route("/gateway/skills/marketplace/fetch", post(skills::handle_marketplace_fetch))
         .route("/gateway/skills/:name", put(skills::handle_put_skill).delete(skills::handle_delete_skill))
         .route("/gateway/skills/:name/toggle", patch(skills::handle_toggle_skill))
         .route("/gateway/agents", get(agents::handle_list_agents).post(agents::handle_save_agent))
         .route("/gateway/agents/:name", put(agents::handle_put_agent).delete(agents::handle_delete_agent))
+        .route("/gateway/agents/:name/toggle", patch(agents::handle_toggle_agent))
         .route("/gateway/teams", get(agents::handle_list_teams).post(agents::handle_save_team))
         .route("/gateway/teams/:id", delete(agents::handle_delete_team))
         .route("/gateway/teams/:id/project", put(projects::handle_link_team))
@@ -292,6 +300,13 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/stats", get(settings::handle_get_stats))
         .route("/gateway/analytics", get(settings::handle_analytics))
         .route("/gateway/settings", get(settings::handle_get_settings).post(settings::handle_update_settings))
+        // Battles, ELO Ratings & Benchmarks (eay-battle)
+        .route("/gateway/battles", get(battles::handle_list_battles).post(battles::handle_save_battle))
+        .route("/gateway/battles/:id", delete(battles::handle_delete_battle))
+        .route("/gateway/elo", get(battles::handle_list_elo).delete(battles::handle_reset_elo))
+        .route("/gateway/elo/match", post(battles::handle_record_elo_match))
+        .route("/gateway/benchmarks", get(battles::handle_list_benchmarks).post(battles::handle_save_benchmark))
+        .route("/gateway/benchmarks/:id", delete(battles::handle_delete_benchmark))
         .layer(middleware::from_fn(admin_auth_middleware));
 
     // CORS sits outside every other layer so preflights never reach auth or concurrency checks.

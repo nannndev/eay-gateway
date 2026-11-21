@@ -86,6 +86,11 @@ pub async fn handle_delete_agent(State(engine): State<GatewayEngine>, Path(name)
     Json(json!({ "status": if deleted { "deleted" } else { "not_found" } }))
 }
 
+pub async fn handle_toggle_agent(State(engine): State<GatewayEngine>, Path(name): Path<String>) -> Result<Json<Value>, GatewayError> {
+    let agent = engine.store.toggle_agent(&name).map_err(GatewayError::NotFound)?;
+    Ok(Json(json!({ "agent": agent })))
+}
+
 #[derive(Deserialize)]
 pub struct SaveTeamPayload {
     /// Set to update this team. Omit to create a new id.

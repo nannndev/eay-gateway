@@ -59,6 +59,7 @@ impl Drop for UsageGuard {
             agent: self.tags.agent.as_deref(),
             team: self.tags.team.as_deref(),
             project: self.tags.project.as_deref(),
+            source: self.tags.source.as_deref(),
         });
         if let Some(id) = &self.key_id {
             self.store.touch_virtual_key(id, inp, out);
