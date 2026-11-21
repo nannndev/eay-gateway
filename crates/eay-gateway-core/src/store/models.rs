@@ -196,6 +196,9 @@ pub struct ProjectRecord {
     pub instructions: String,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Absolute folder the project works in. When set, requests get file tools confined to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
     pub created_at: f64,
     pub updated_at: f64,
 }

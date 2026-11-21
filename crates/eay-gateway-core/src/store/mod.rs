@@ -169,6 +169,8 @@ impl GatewayStore {
         let _ = conn.execute("ALTER TABLE teams ADD COLUMN project TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN project TEXT", []);
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS usage_project ON usage(project, ts)", []);
+        let _ = conn.execute("ALTER TABLE projects ADD COLUMN root TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT", []);
         Ok(())
     }
 }

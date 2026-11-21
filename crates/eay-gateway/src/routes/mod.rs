@@ -251,6 +251,8 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
             get(projects::handle_get_project).put(projects::handle_put_project).delete(projects::handle_delete_project),
         )
         .route("/gateway/projects/:id/usage", get(projects::handle_project_usage))
+        .route("/gateway/fs/dirs", get(projects::handle_list_dirs))
+        .route("/gateway/projects/:id/files", get(projects::handle_project_files))
         // Combos
         .route("/gateway/combos", get(settings::handle_list_combos).post(settings::handle_save_combo))
         .route("/gateway/combos/:name", put(settings::handle_put_combo).delete(settings::handle_delete_combo))
@@ -264,7 +266,10 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/teams/:id", delete(agents::handle_delete_team))
         .route("/gateway/teams/:id/project", put(projects::handle_link_team))
         .route("/gateway/sessions", get(agents::handle_list_sessions))
-        .route("/gateway/sessions/:id", get(agents::handle_get_session).delete(agents::handle_delete_session))
+        .route(
+            "/gateway/sessions/:id",
+            get(agents::handle_get_session).patch(agents::handle_rename_session).delete(agents::handle_delete_session),
+        )
         // Live Activity & Subagents
         .route("/gateway/events", get(runs::handle_activity_events))
         .route("/gateway/activity", get(runs::handle_activity_snapshot))

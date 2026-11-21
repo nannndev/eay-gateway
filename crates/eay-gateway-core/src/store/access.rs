@@ -432,7 +432,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, name, instructions, metadata, created_at, updated_at FROM projects ORDER BY name ASC, id ASC",
+            "SELECT id, name, instructions, metadata, created_at, updated_at, root FROM projects ORDER BY name ASC, id ASC",
             [],
             |r| {
                 Ok(ProjectRecord {
@@ -442,6 +442,7 @@ impl GatewayStore {
                     metadata: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or(Value::Null),
                     created_at: r.get(4)?,
                     updated_at: r.get(5)?,
+                    root: r.get(6)?,
                 })
             },
         )
@@ -452,8 +453,16 @@ impl GatewayStore {
     }
 
     /// Creates (`id` None → `prj_…`) or updates a project. `metadata` must be a JSON object and is
-    /// stored as the app sent it; the gateway never reads it.
-    pub fn save_project(&self, id: Option<&str>, name: &str, instructions: &str, metadata: &Value) -> Result<ProjectRecord, String> {
+    /// stored as the app sent it; the gateway never reads it. `root` must already be checked
+    /// (see [`crate::workspace::prepare_root`]).
+    pub fn save_project(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        instructions: &str,
+        metadata: &Value,
+        root: Option<&str>,
+    ) -> Result<ProjectRecord, String> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 100 {
             return Err("Project name must be 1-100 characters".into());
@@ -479,11 +488,19 @@ impl GatewayStore {
         let updated_at = now();
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT OR REPLACE INTO projects (id, name, instructions, metadata, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, name, instructions, meta_json, created_at, updated_at],
+            "INSERT OR REPLACE INTO projects (id, name, instructions, metadata, created_at, updated_at, root) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, name, instructions, meta_json, created_at, updated_at, root],
         )
         .map_err(|e| e.to_string())?;
-        Ok(ProjectRecord { id, name: name.to_string(), instructions: instructions.to_string(), metadata, created_at, updated_at })
+        Ok(ProjectRecord {
+            id,
+            name: name.to_string(),
+            instructions: instructions.to_string(),
+            metadata,
+            root: root.map(str::to_string),
+            created_at,
+            updated_at,
+        })
     }
 
     /// Deletes a project and unlinks what pointed at it. Keys, teams, sessions and usage stay;
@@ -550,7 +567,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         // Keep the roster binding. INSERT OR REPLACE would otherwise reset the new `team` column.
         conn.execute(
-            "INSERT OR REPLACE INTO sessions (id, messages, updated_at, team, project) VALUES (?1, ?2, ?3, (SELECT team FROM sessions WHERE id = ?1), (SELECT project FROM sessions WHERE id = ?1))",
+            "INSERT OR REPLACE INTO sessions (id, messages, updated_at, team, project, title) VALUES (?1, ?2, ?3, (SELECT team FROM sessions WHERE id = ?1), (SELECT project FROM sessions WHERE id = ?1), (SELECT title FROM sessions WHERE id = ?1))",
             params![id, json, now()],
         )
         .map_err(|e| e.to_string())?;
@@ -580,7 +597,7 @@ impl GatewayStore {
         let conn = self.conn.lock();
         query_rows(
             &conn,
-            "SELECT id, json_array_length(messages), updated_at, team, project FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+            "SELECT id, json_array_length(messages), updated_at, team, project, title FROM sessions ORDER BY updated_at DESC LIMIT ?1",
             params![limit as i64],
             |r| {
                 let id: String = r.get(0)?;
@@ -598,9 +615,27 @@ impl GatewayStore {
                     "messages": r.get::<_, i64>(1)?, "updated_at": r.get::<_, f64>(2)?,
                     "team": r.get::<_, Option<String>>(3)?,
                     "project": r.get::<_, Option<String>>(4)?,
+                    "title": r.get::<_, Option<String>>(5)?,
                 }))
             },
         )
+    }
+
+    /// A person-given name for the session; empty clears it. Returns false if there is no such session.
+    pub fn set_session_title(&self, id: &str, title: &str) -> Result<bool, String> {
+        let title = title.trim();
+        if title.chars().count() > 200 {
+            return Err("Session title is limited to 200 characters".into());
+        }
+        let title = (!title.is_empty()).then_some(title);
+        let conn = self.conn.lock();
+        let rows = conn.execute("UPDATE sessions SET title = ?2 WHERE id = ?1", params![id, title]).map_err(|e| e.to_string())?;
+        Ok(rows > 0)
+    }
+
+    pub fn session_title(&self, id: &str) -> Option<String> {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT title FROM sessions WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0)).ok().flatten()
     }
 
     pub fn session_updated_at(&self, id: &str) -> Option<f64> {

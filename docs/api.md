@@ -109,6 +109,9 @@ customer id, a tenant) and is stored as you send it.
 | `GET /gateway/projects` | All projects |
 | `POST /gateway/projects` | `{"name":"Shop","instructions":"Answer in Indonesian.","metadata":{"repo":"/code/shop"}}` → `{"project":{"id":"prj_…",…}}`. `metadata` must be a JSON object (up to 64 KB); `instructions` up to 20 000 bytes |
 | `GET /gateway/projects/:id` | The project plus its `keys` (prefix only), `teams` and `sessions` |
+| `root` (in create / update) | Absolute folder the project works in; add `"create":true` to make a new folder. Requests in the project then get file tools `mcp__eay_project__list_dir`, `read_file`, `grep` (read-only) and `write_file`, `edit_file`, confined to that folder (no `..`, no symlinks out). Tool policies and approvals apply as for MCP tools, e.g. `manual_for_writes` |
+| `GET /gateway/projects/:id/files?path=` | Inside the project's `root`: a folder gives `{path, entries:[{name, dir}]}` (folders first, `node_modules`/`.git`/`target`… left out), a file gives `{path, content, size, truncated}` (first 256 KB) |
+| `GET /gateway/fs/dirs?path=` | Subfolders of `path` (default: home; `~` works) as `{path, parent, home, dirs}`, for picking a project folder from a browser. Hidden folders are left out |
 | `PUT /gateway/projects/:id` | Same body as create; the id and creation time stay |
 | `DELETE /gateway/projects/:id` | Deletes the project. Its keys, teams, sessions and usage are kept, unlinked |
 | `GET /gateway/projects/:id/usage` | `totals` (requests, tokens, cached tokens, estimated cost, errors) and per `models`, `agents` and `teams`. `?days=N` limits the range |
@@ -250,6 +253,7 @@ Without a token, those management routes and the `x-eay-mcp` header only work wh
 | `DELETE /gateway/teams/:id` | Delete a roster. Sessions that used it are left in place; their next request reports the team as missing |
 | `GET /gateway/sessions` | Sessions, newest first: `id` (storage id), `session`, `owner` (`local` or `key:<id>`), message count, `team` (roster id `tm_…`, if one was bound), `updated_at`. `?limit=` (default 100, max 1000) |
 | `GET /gateway/sessions/:id` | One session's `messages` and the `subagents` that ran in it. Use the `id` from the list; a bare session name finds the local (no-key) one |
+| `PATCH /gateway/sessions/:id` | `{"title":"Fix login bug"}` renames a session (up to 200 characters; empty clears it). The title shows in the list and detail and survives new messages |
 | `DELETE /gateway/sessions/:id` | Clear saved conversation history for a session id |
 | `GET /gateway/events` | SSE stream of real-time request & subagent activity phases (`queued`, `preparing`, `routing`, `waiting_upstream`, `thinking`, `calling_tool`, `awaiting_approval`, `approved`, `denied`, `generating`, `failover`, `completed`, `failed`, `cancelled`), including structured `meta` (`action`, `file`, `lines`, `added`, `removed`, `command`, `duration_ms`) |
 | `GET /gateway/activity` | JSON snapshot of recent `events` and `subagents` |

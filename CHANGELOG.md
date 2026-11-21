@@ -2,6 +2,26 @@
 
 All notable changes to `eay-gateway` are documented in this file.
 
+## [0.6.0] - 2026-11-21
+
+### Added
+- **Project folders:** a project can point at a folder (`root`, absolute or `~/…`;
+  `"create": true` makes a new one). Requests in the project get file tools confined to it:
+  `mcp__eay_project__list_dir`, `read_file`, `grep` (read-only) and `write_file`, `edit_file`.
+  Paths with `..`, absolute paths elsewhere and symlinks out of the folder are refused. Tool
+  policies and approvals apply as for MCP tools (`manual_for_writes` reviews every edit), and the
+  system prompt tells the model which folder it works in.
+- `GET /gateway/projects/:id/files?path=` lists a folder in the project or returns a file's text
+  (first 256 KB), for showing the project in a UI.
+- `GET /gateway/fs/dirs?path=` lists subfolders (default: home), so a browser UI can pick a
+  project folder. Admin-only, hidden folders left out.
+- **Session titles:** `PATCH /gateway/sessions/:id` `{"title":"…"}` renames a session. The title
+  shows in `GET /gateway/sessions` and the session detail and survives new messages.
+
+### Upgrade notes
+- The database gains `projects.root` and `sessions.title`, added on first start. Existing
+  projects have no folder and existing sessions no title.
+
 ## [0.5.0] - 2026-11-19
 
 ### Added

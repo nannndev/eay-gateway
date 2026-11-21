@@ -13,6 +13,7 @@ pub mod providers;
 pub mod quota;
 pub mod store;
 pub mod translate;
+pub mod workspace;
 
 pub use cipher::Cipher;
 pub use engine::{ChatError, ChatReply, ChatStream, GatewayEngine};

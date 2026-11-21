@@ -511,15 +511,15 @@ mod projects {
     #[test]
     fn create_update_validate_and_delete() {
         let (s, _d) = store();
-        let p = s.save_project(None, "Shop", "Be brief.", &json!({ "repo": "/x" })).unwrap();
+        let p = s.save_project(None, "Shop", "Be brief.", &json!({ "repo": "/x" }), None).unwrap();
         assert!(p.id.starts_with("prj_"));
-        let again = s.save_project(Some(&p.id), "Shop v2", "", &json!(null)).unwrap();
+        let again = s.save_project(Some(&p.id), "Shop v2", "", &json!(null), None).unwrap();
         assert_eq!(again.id, p.id);
         assert_eq!(again.created_at, p.created_at, "editing keeps the creation time");
         assert_eq!(again.metadata, json!({}), "null metadata becomes an empty object");
-        assert!(s.save_project(None, "", "", &json!({})).is_err());
-        assert!(s.save_project(None, "x", "", &json!([1, 2])).is_err(), "metadata must be an object");
-        assert!(s.save_project(Some("prj_missing"), "x", "", &json!({})).is_err());
+        assert!(s.save_project(None, "", "", &json!({}), None).is_err());
+        assert!(s.save_project(None, "x", "", &json!([1, 2]), None).is_err(), "metadata must be an object");
+        assert!(s.save_project(Some("prj_missing"), "x", "", &json!({}), None).is_err());
         assert!(s.set_project_link("keys", "nope", Some(&p.id)).is_err());
         assert!(s.set_project_link("agents", "x", Some(&p.id)).is_err(), "only keys and teams link");
         assert!(s.delete_project(&p.id).unwrap());
@@ -530,7 +530,7 @@ mod projects {
     fn editing_a_team_keeps_its_project() {
         let (s, _d) = store();
         s.save_agent("a", "", "auto", &[], "", None, None, &Default::default(), true, &[]).unwrap();
-        let p = s.save_project(None, "P", "", &json!({})).unwrap();
+        let p = s.save_project(None, "P", "", &json!({}), None).unwrap();
         let t = s.save_team(None, "crew", "", &["a".into()]).unwrap();
         s.set_project_link("teams", &t.id, Some(&p.id)).unwrap();
         let edited = s.save_team(Some(&t.id), "crew2", "", &["a".into()]).unwrap();
@@ -565,7 +565,7 @@ mod upgrade_to_projects {
         assert_eq!(s.list_teams().len(), 1);
         assert_eq!(s.get_session_messages("local:s1").len(), 1);
         assert_eq!(s.list_virtual_keys().len(), 1);
-        let p = s.save_project(None, "P", "", &serde_json::json!({})).unwrap();
+        let p = s.save_project(None, "P", "", &serde_json::json!({}), None).unwrap();
         let team = s.list_teams()[0].id.clone();
         s.set_project_link("teams", &team, Some(&p.id)).unwrap();
         s.set_session_project("local:s1", &p.id).unwrap();

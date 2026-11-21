@@ -533,6 +533,14 @@ async fn sessions_can_be_listed_and_read() {
     // A bare session name finds the local session too.
     assert_eq!(get_json(&gw.app, "/gateway/sessions/chat-1").await.0, StatusCode::OK);
     assert_eq!(get_json(&gw.app, "/gateway/sessions/nope").await.0, StatusCode::NOT_FOUND);
+
+    // Renaming sticks across new messages, and an unknown session is 404.
+    let (st, _) = send_json(&gw.app, "PATCH", "/gateway/sessions/chat-1", json!({ "title": "Login bug" })).await;
+    assert_eq!(st, StatusCode::OK);
+    post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-session-id", "chat-1")]).await;
+    assert_eq!(get_json(&gw.app, "/gateway/sessions").await.1["sessions"][0]["title"], "Login bug");
+    assert_eq!(get_json(&gw.app, "/gateway/sessions/chat-1").await.1["title"], "Login bug");
+    assert_eq!(send_json(&gw.app, "PATCH", "/gateway/sessions/nope", json!({ "title": "x" })).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -799,6 +807,28 @@ async fn a_project_adds_its_instructions_and_owns_its_usage() {
     let (st, _) =
         post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-project", "prj_nope")]).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_project_with_a_folder_gives_the_model_file_tools() {
+    let gw = gateway(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("README.md"), "hi").unwrap();
+    let (st, _) = post_raw(&gw.app, "/gateway/projects", json!({ "name": "R", "root": "relative/dir" }), &[]).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a relative root is refused");
+    let (st, p) = post_raw(&gw.app, "/gateway/projects", json!({ "name": "Repo", "root": dir.path() }), &[]).await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    let id = serde_json::from_str::<Value>(&p).unwrap()["project"]["id"].as_str().unwrap().to_string();
+
+    // The mock calls the first offered tool (list_dir, no args = the folder itself) and echoes it.
+    let (st, body) =
+        post_raw(&gw.app, "/v1/chat/completions", json!({ "model": "auto", "messages": hello() }), &[("x-eay-project", &id)]).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.contains("tool said: README.md"), "{body}");
+    let sent = gw.seen.lock().unwrap().first().unwrap().clone();
+    assert!(sent["messages"][0]["content"].as_str().unwrap().contains("project folder"), "{sent}");
+    let names: Vec<&str> = sent["tools"].as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
+    assert!(names.contains(&"mcp__eay_project__edit_file"), "{names:?}");
 }
 
 #[tokio::test]
