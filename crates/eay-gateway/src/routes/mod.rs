@@ -257,7 +257,11 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         )
         .route("/gateway/projects/:id/usage", get(projects::handle_project_usage))
         .route("/gateway/fs/dirs", get(projects::handle_list_dirs))
-        .route("/gateway/projects/:id/files", get(projects::handle_project_files))
+        .route("/gateway/projects/:id/files", get(projects::handle_project_files).put(projects::handle_write_project_file))
+        .route("/gateway/projects/:id/files/raw", get(projects::handle_project_file_raw))
+        .route("/gateway/projects/:id/changes", get(projects::handle_project_changes))
+        .route("/gateway/projects/:id/diff", get(projects::handle_project_diff))
+        .route("/gateway/projects/:id/git", post(projects::handle_project_git))
         // Combos
         .route("/gateway/combos", get(settings::handle_list_combos).post(settings::handle_save_combo))
         .route("/gateway/combos/:name", put(settings::handle_put_combo).delete(settings::handle_delete_combo))

@@ -3,6 +3,8 @@
 use crate::error::GatewayError;
 use axum::{
     extract::{Path, Query, State},
+    http::{header, HeaderValue},
+    response::{IntoResponse, Response},
     Json,
 };
 use eay_gateway_core::engine::GatewayEngine;
@@ -98,14 +100,114 @@ pub async fn handle_project_files(
     Path(id): Path<String>,
     Query(q): Query<DirsQuery>,
 ) -> Result<Json<Value>, GatewayError> {
-    let project = engine.store.get_project(&id).ok_or_else(|| GatewayError::NotFound(format!("Project '{id}' not found")))?;
-    let root = project.root.ok_or_else(|| GatewayError::BadRequest("This project has no folder".into()))?;
+    let root = project_root(&engine, &id)?;
     let rel = q.path.unwrap_or_default();
     tokio::task::spawn_blocking(move || eay_gateway_core::workspace::browse(&root, &rel))
         .await
         .map_err(|e| GatewayError::Internal(e.to_string()))?
         .map(Json)
         .map_err(GatewayError::BadRequest)
+}
+
+#[derive(Deserialize)]
+pub struct WriteFilePayload {
+    path: Option<String>,
+    content: String,
+}
+
+/// `PUT /gateway/projects/:id/files?path=` saves edited file content confined to the project root.
+pub async fn handle_write_project_file(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Query(q): Query<DirsQuery>,
+    Json(p): Json<WriteFilePayload>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    let rel = p.path.or(q.path).unwrap_or_default();
+    if rel.trim().is_empty() {
+        return Err(GatewayError::BadRequest("path is required".into()));
+    }
+    tokio::task::spawn_blocking(move || eay_gateway_core::workspace::write_text_file(&root, &rel, &p.content))
+        .await
+        .map_err(|e| GatewayError::Internal(e.to_string()))?
+        .map(Json)
+        .map_err(GatewayError::BadRequest)
+}
+
+/// `GET /gateway/projects/:id/files/raw?path=` streams raw bytes for binary assets (images, PDFs).
+pub async fn handle_project_file_raw(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Query(q): Query<DirsQuery>,
+) -> Result<Response, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    let rel = q.path.unwrap_or_default();
+    let (bytes, mime) = tokio::task::spawn_blocking(move || eay_gateway_core::workspace::read_raw_file(&root, &rel))
+        .await
+        .map_err(|e| GatewayError::Internal(e.to_string()))?
+        .map_err(GatewayError::BadRequest)?;
+    let mut resp = bytes.into_response();
+    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    Ok(resp)
+}
+
+/// `GET /gateway/projects/:id/changes` returns real working-tree git status & line stats.
+pub async fn handle_project_changes(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    tokio::task::spawn_blocking(move || eay_gateway_core::workspace::git_changes(&root))
+        .await
+        .map_err(|e| GatewayError::Internal(e.to_string()))?
+        .map(Json)
+        .map_err(GatewayError::BadRequest)
+}
+
+/// `GET /gateway/projects/:id/diff?path=` returns unified diff & HEAD vs working-tree snapshot.
+pub async fn handle_project_diff(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Query(q): Query<DirsQuery>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    let rel = q.path.unwrap_or_default();
+    if rel.trim().is_empty() {
+        return Err(GatewayError::BadRequest("path is required".into()));
+    }
+    tokio::task::spawn_blocking(move || eay_gateway_core::workspace::git_file_diff(&root, &rel))
+        .await
+        .map_err(|e| GatewayError::Internal(e.to_string()))?
+        .map(Json)
+        .map_err(GatewayError::BadRequest)
+}
+
+#[derive(Deserialize)]
+pub struct GitActionPayload {
+    action: String,
+    #[serde(default)]
+    paths: Vec<String>,
+    message: Option<String>,
+    #[serde(default)]
+    stage_all: bool,
+}
+
+/// `POST /gateway/projects/:id/git` runs safe structured git actions (stage, unstage, discard, commit, push, pull).
+pub async fn handle_project_git(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Json(p): Json<GitActionPayload>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    tokio::task::spawn_blocking(move || {
+        eay_gateway_core::workspace::git_action(&root, &p.action, &p.paths, p.message.as_deref(), p.stage_all)
+    })
+    .await
+    .map_err(|e| GatewayError::Internal(e.to_string()))?
+    .map(Json)
+    .map_err(GatewayError::BadRequest)
+}
+
+fn project_root(engine: &GatewayEngine, id: &str) -> Result<String, GatewayError> {
+    let project = engine.store.get_project(id).ok_or_else(|| GatewayError::NotFound(format!("Project '{id}' not found")))?;
+    project.root.ok_or_else(|| GatewayError::BadRequest("This project has no folder".into()))
 }
 
 #[derive(Deserialize)]
