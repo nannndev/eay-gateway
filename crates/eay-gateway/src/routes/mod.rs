@@ -257,7 +257,15 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         )
         .route("/gateway/projects/:id/usage", get(projects::handle_project_usage))
         .route("/gateway/fs/dirs", get(projects::handle_list_dirs))
-        .route("/gateway/projects/:id/files", get(projects::handle_project_files).put(projects::handle_write_project_file))
+        .route(
+            "/gateway/projects/:id/files",
+            get(projects::handle_project_files)
+                .put(projects::handle_write_project_file)
+                .patch(projects::handle_rename_project_file)
+                .delete(projects::handle_delete_project_file),
+        )
+        .route("/gateway/projects/:id/mkdir", post(projects::handle_mkdir_project))
+        .route("/gateway/projects/:id/search", get(projects::handle_search_project_files))
         .route("/gateway/projects/:id/files/raw", get(projects::handle_project_file_raw))
         .route("/gateway/projects/:id/changes", get(projects::handle_project_changes))
         .route("/gateway/projects/:id/diff", get(projects::handle_project_diff))

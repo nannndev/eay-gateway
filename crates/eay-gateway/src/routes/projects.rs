@@ -239,6 +239,95 @@ pub async fn handle_project_terminal(
         .map_err(GatewayError::BadRequest)
 }
 
+#[derive(Deserialize)]
+pub struct DeleteFileQuery {
+    path: Option<String>,
+    #[serde(default)]
+    recursive: bool,
+}
+
+/// `DELETE /gateway/projects/:id/files?path=&recursive=` deletes a file or folder inside the project root.
+pub async fn handle_delete_project_file(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteFileQuery>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    let rel = q.path.unwrap_or_default();
+    if rel.trim().is_empty() {
+        return Err(GatewayError::BadRequest("path is required".into()));
+    }
+    tokio::task::spawn_blocking(move || eay_gateway_core::workspace::delete_entry(&root, &rel, q.recursive))
+        .await
+        .map_err(|e| GatewayError::Internal(e.to_string()))?
+        .map(Json)
+        .map_err(GatewayError::BadRequest)
+}
+
+#[derive(Deserialize)]
+pub struct RenameFilePayload {
+    from: String,
+    to: String,
+}
+
+/// `PATCH /gateway/projects/:id/files` renames or moves a file/folder inside the project root.
+pub async fn handle_rename_project_file(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Json(p): Json<RenameFilePayload>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    tokio::task::spawn_blocking(move || eay_gateway_core::workspace::rename_entry(&root, &p.from, &p.to))
+        .await
+        .map_err(|e| GatewayError::Internal(e.to_string()))?
+        .map(Json)
+        .map_err(GatewayError::BadRequest)
+}
+
+#[derive(Deserialize)]
+pub struct MkdirPayload {
+    path: String,
+}
+
+/// `POST /gateway/projects/:id/mkdir` creates a folder (and parents) inside the project root.
+pub async fn handle_mkdir_project(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Json(p): Json<MkdirPayload>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    tokio::task::spawn_blocking(move || eay_gateway_core::workspace::create_dir(&root, &p.path))
+        .await
+        .map_err(|e| GatewayError::Internal(e.to_string()))?
+        .map(Json)
+        .map_err(GatewayError::BadRequest)
+}
+
+#[derive(Deserialize)]
+pub struct SearchFilesQuery {
+    q: String,
+    path: Option<String>,
+    #[serde(default)]
+    case_insensitive: bool,
+    limit: Option<usize>,
+}
+
+/// `GET /gateway/projects/:id/search?q=&path=&case_insensitive=` searches text across project files.
+pub async fn handle_search_project_files(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Query(q): Query<SearchFilesQuery>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    tokio::task::spawn_blocking(move || {
+        eay_gateway_core::workspace::search_text(&root, &q.q, q.path.as_deref(), q.case_insensitive, q.limit)
+    })
+    .await
+    .map_err(|e| GatewayError::Internal(e.to_string()))?
+    .map(Json)
+    .map_err(GatewayError::BadRequest)
+}
+
 fn project_root(engine: &GatewayEngine, id: &str) -> Result<String, GatewayError> {
     let project = engine.store.get_project(id).ok_or_else(|| GatewayError::NotFound(format!("Project '{id}' not found")))?;
     project.root.ok_or_else(|| GatewayError::BadRequest("This project has no folder".into()))
