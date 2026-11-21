@@ -1112,6 +1112,13 @@ impl GatewayEngine {
                         }
                     }
                 }
+                // Exhausted MAX_MCP_ROUNDS without a final text reply: strip tools & restore caller_stream
+                // so the wrap-up turn below summarizes findings instead of emitting another unexecuted tool_call.
+                if let Some(obj) = body.as_object_mut() {
+                    obj.remove("tools");
+                    obj.remove("tool_choice");
+                    obj.insert("stream".into(), json!(caller_stream));
+                }
             }
         }
 

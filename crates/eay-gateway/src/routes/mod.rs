@@ -258,10 +258,13 @@ pub fn gateway_router(engine: GatewayEngine) -> Router {
         .route("/gateway/combos/:name", put(settings::handle_put_combo).delete(settings::handle_delete_combo))
         // Skills (Context Presets) & Agents (Personalities) & Sessions
         .route("/gateway/skills", get(skills::handle_list_skills).post(skills::handle_save_skill))
+        .route("/gateway/skills/marketplace", get(skills::handle_marketplace_search))
+        .route("/gateway/skills/marketplace/fetch", post(skills::handle_marketplace_fetch))
         .route("/gateway/skills/:name", put(skills::handle_put_skill).delete(skills::handle_delete_skill))
         .route("/gateway/skills/:name/toggle", patch(skills::handle_toggle_skill))
         .route("/gateway/agents", get(agents::handle_list_agents).post(agents::handle_save_agent))
         .route("/gateway/agents/:name", put(agents::handle_put_agent).delete(agents::handle_delete_agent))
+        .route("/gateway/agents/:name/toggle", patch(agents::handle_toggle_agent))
         .route("/gateway/teams", get(agents::handle_list_teams).post(agents::handle_save_team))
         .route("/gateway/teams/:id", delete(agents::handle_delete_team))
         .route("/gateway/teams/:id/project", put(projects::handle_link_team))
