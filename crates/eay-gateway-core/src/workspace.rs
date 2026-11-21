@@ -166,8 +166,9 @@ fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(real)
 }
 
+/// Path relative to the project, with `/` on every OS so the model and the UI see one form.
 fn shown(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root).unwrap_or(p).to_string_lossy().into_owned()
+    p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
 }
 
 /// Runs one tool. Errors come back as text for the model, like an MCP tool error would.
