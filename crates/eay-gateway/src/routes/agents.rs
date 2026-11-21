@@ -138,9 +138,28 @@ pub async fn handle_get_session(State(engine): State<GatewayEngine>, Path(id): P
     Ok(Json(json!({
         "id": storage, "session": name, "updated_at": updated_at,
         "team": engine.store.session_team(&storage),
+        "title": engine.store.session_title(&storage),
         "messages": engine.store.get_session_messages(&storage),
         "subagents": subagents,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct RenameSessionPayload {
+    title: String,
+}
+
+/// `PATCH /gateway/sessions/:id` `{"title":"…"}` renames a session (an empty title clears it).
+pub async fn handle_rename_session(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Json(p): Json<RenameSessionPayload>,
+) -> Result<Json<Value>, GatewayError> {
+    let storage = if engine.store.session_updated_at(&id).is_some() { id } else { eay_gateway_core::engine::session_storage_id(None, &id) };
+    if !engine.store.set_session_title(&storage, &p.title).map_err(GatewayError::BadRequest)? {
+        return Err(GatewayError::NotFound("Session not found".into()));
+    }
+    Ok(Json(json!({ "id": storage, "title": engine.store.session_title(&storage) })))
 }
 
 pub async fn handle_delete_session(State(engine): State<GatewayEngine>, Path(id): Path<String>) -> Json<Value> {

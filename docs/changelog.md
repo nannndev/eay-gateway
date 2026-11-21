@@ -2,6 +2,13 @@
 
 All notable changes to **eay-gateway** are listed below.
 
+## v0.6.0 — 2026-11-21
+
+- **Project folders:** point a project at a folder and its agents can list, read, search and edit
+  files there, and nowhere else. Pick the folder from a browser with `GET /gateway/fs/dirs`, and
+  show the project's files with `GET /gateway/projects/:id/files`.
+- **Rename sessions:** `PATCH /gateway/sessions/:id` gives a session a title.
+
 ## v0.5.0 — 2026-11-19
 
 - **Projects:** group keys, teams, sessions and usage under one id (`prj_…`), with shared

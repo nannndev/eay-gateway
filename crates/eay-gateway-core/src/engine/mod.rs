@@ -828,7 +828,19 @@ impl GatewayEngine {
         let usage_agent = running_agent.clone().or(agent_label.clone()).filter(|name| !name.is_empty());
         let usage_tags = UsageTags { agent: usage_agent.clone(), team: team_id.clone(), project: project.as_ref().map(|p| p.id.clone()) };
         // The project's instructions come first, so an agent's personality and skills refine them.
-        if let Some(text) = project.as_ref().map(|p| p.instructions.trim()).filter(|t| !t.is_empty()) {
+        let project_root = project.as_ref().and_then(|p| p.root.clone());
+        let project_text = project.as_ref().map(|p| {
+            let mut text = p.instructions.trim().to_string();
+            if let Some(root) = &project_root {
+                let note = format!(
+                    "You work in the project folder {root}. Use the {} tools (paths relative to that folder) to look at and change its files.",
+                    crate::workspace::SERVER
+                );
+                text = if text.is_empty() { note } else { format!("{note}\n\n{text}") };
+            }
+            text
+        });
+        if let Some(text) = project_text.filter(|t| !t.is_empty()) {
             if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
                 let name = project.as_ref().map(|p| p.name.as_str()).unwrap_or("");
                 msgs.insert(0, json!({ "role": "system", "content": format!("[Project: {name}]\n{text}") }));
@@ -877,7 +889,7 @@ impl GatewayEngine {
             delegation_limit(opts.depth, &agent_tool_policy, &key_policy, opts.inherited_policy.as_ref(), running_agent.is_some());
         // A worker can talk to its lead and siblings even when it is not allowed to delegate further.
         let in_team = opts.depth > 0 || delegate_budget > 0;
-        if !mcp_records.is_empty() || in_team {
+        if !mcp_records.is_empty() || in_team || project_root.is_some() {
             let mut merged_tools = body.get("tools").and_then(|t| t.as_array()).cloned().unwrap_or_default();
             let mut mcp_index = crate::mcp::McpToolIndex::default();
             if in_team {
@@ -896,6 +908,16 @@ impl GatewayEngine {
             let child_policy = combine_policies(&policies);
             for srv in &mcp_records {
                 let (tools, index) = self.mcp_tools_cached(srv).await;
+                for t in tools {
+                    let shown = t["function"]["name"].as_str().unwrap_or("");
+                    if index.get(shown).is_some_and(|r| crate::mcp::all_permit(&policies, r)) {
+                        merged_tools.push(t);
+                    }
+                }
+                mcp_index.extend(index);
+            }
+            if project_root.is_some() {
+                let (tools, index) = crate::workspace::tools();
                 for t in tools {
                     let shown = t["function"]["name"].as_str().unwrap_or("");
                     if index.get(shown).is_some_and(|r| crate::mcp::all_permit(&policies, r)) {
@@ -1049,6 +1071,10 @@ impl GatewayEngine {
                                 let (mut meta, msg_label) = build_tool_activity_meta(full_name, &args);
                                 let t_tool = std::time::Instant::now();
                                 let res = match mcp_records.iter().find(|s| s.name == srv_name) {
+                                    _ if srv_name == crate::workspace::SERVER => match &project_root {
+                                        Some(root) => crate::workspace::call(root.clone(), tool_name.to_string(), args).await,
+                                        None => "This project has no folder.".into(),
+                                    },
                                     Some(srv) => match crate::mcp::call_tool_rich(&self.http_client, srv, tool_name, args).await {
                                         Ok(out) => {
                                             tool_images.extend(

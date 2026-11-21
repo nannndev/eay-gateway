@@ -85,7 +85,9 @@ jobs:
           lipo=$(command -v llvm-lipo || ls /usr/bin/llvm-lipo-* 2>/dev/null | sort -V | tail -1)
           if [ -z "$lipo" ]; then sudo apt-get install -y -qq llvm >/dev/null && lipo=llvm-lipo; fi
           "$lipo" -create eay-gateway-aarch64-apple-darwin eay-gateway-x86_64-apple-darwin -output eay-gateway-universal-apple-darwin
-          "$lipo" -archs eay-gateway-universal-apple-darwin | tr " " "\n" | sort | tr "\n" " " | grep -q "^arm64 x86_64 $" || { echo "universal binary is missing an arch"; exit 1; }
+          archs=" $("$lipo" -archs eay-gateway-universal-apple-darwin | tr -s ' \n' '  ') "
+          echo "universal archs:$archs"
+          [[ "$archs" == *" arm64 "* && "$archs" == *" x86_64 "* ]] || { echo "universal binary is missing an arch"; exit 1; }
           chmod +x eay-gateway-*-darwin eay-gateway-*-linux-*
           sha256sum eay-gateway-* > SHA256SUMS.txt
       - name: Publish GitHub release
