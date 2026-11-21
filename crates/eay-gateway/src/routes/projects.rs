@@ -205,6 +205,26 @@ pub async fn handle_project_git(
     .map_err(GatewayError::BadRequest)
 }
 
+#[derive(Deserialize)]
+pub struct TerminalExecPayload {
+    command: String,
+    cwd: Option<String>,
+    timeout_secs: Option<u64>,
+}
+
+/// `POST /gateway/projects/:id/terminal` runs a shell command confined to the project folder.
+pub async fn handle_project_terminal(
+    State(engine): State<GatewayEngine>,
+    Path(id): Path<String>,
+    Json(p): Json<TerminalExecPayload>,
+) -> Result<Json<Value>, GatewayError> {
+    let root = project_root(&engine, &id)?;
+    eay_gateway_core::workspace::exec_terminal(&root, &p.command, p.cwd.as_deref(), p.timeout_secs)
+        .await
+        .map(Json)
+        .map_err(GatewayError::BadRequest)
+}
+
 fn project_root(engine: &GatewayEngine, id: &str) -> Result<String, GatewayError> {
     let project = engine.store.get_project(id).ok_or_else(|| GatewayError::NotFound(format!("Project '{id}' not found")))?;
     project.root.ok_or_else(|| GatewayError::BadRequest("This project has no folder".into()))
