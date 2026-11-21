@@ -67,6 +67,7 @@ Raspberry Pi there is a Docker image: see [Getting started](docs/getting-started
 | [Providers](docs/providers.md) | Every provider, its alias, how to log in, quotas and model sync |
 | [HTTP API](docs/api.md) | `/v1` inference APIs and `/gateway/<resource>` management: keys, agents, tool policies, subagents, approvals, sessions & live activity |
 | [Architecture](docs/architecture.md) | Crates and modules, request flow, storage, embedding the core in Rust |
+| [Core library](docs/core.md) | `eay-gateway-core` reference: modules, engine API, limits, store, translators, tests |
 | [Development](docs/development.md) | Building, testing, releasing, adding a provider |
 
 To preview the VitePress documentation & landing page locally:
